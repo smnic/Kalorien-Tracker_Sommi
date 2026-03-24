@@ -1,0 +1,1365 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Kalorien" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>KalorienTracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overscroll-behavior: none; }
+    .pb-safe { padding-bottom: max(env(safe-area-inset-bottom, 0px), 8px); }
+    .pt-safe { padding-top: env(safe-area-inset-top, 0px); }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=search]::-webkit-search-cancel-button { display: none; }
+    ::-webkit-scrollbar { display: none; }
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .toast-enter { animation: toastIn 0.3s ease forwards; }
+    @keyframes toastIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .modal-enter { animation: modalIn 0.25s ease forwards; }
+    @keyframes modalIn { from { transform: translateY(100%); } to { transform: translateY(0); } }
+    .slide-in { animation: slideIn 0.2s ease forwards; }
+    @keyframes slideIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    .ring-track { fill: none; stroke: #1e293b; stroke-width: 13; }
+    .ring-fill { fill: none; stroke-width: 13; stroke-linecap: round; transform-origin: center; transform: rotate(-90deg); transition: stroke-dashoffset 0.6s cubic-bezier(0.4,0,0.2,1), stroke 0.4s; }
+    .macro-fill { transition: width 0.6s cubic-bezier(0.4,0,0.2,1); }
+    .btn-active { transition: transform 0.1s, opacity 0.1s; }
+    .btn-active:active { transform: scale(0.95); opacity: 0.85; }
+  </style>
+</head>
+
+<body class="bg-slate-950 text-white min-h-screen overflow-x-hidden">
+
+<div id="app" class="max-w-md mx-auto min-h-screen flex flex-col relative"></div>
+<div id="toast-container" class="fixed bottom-24 left-0 right-0 z-[100] flex flex-col items-center gap-2 pointer-events-none"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+//  STORAGE HELPERS
+// ═══════════════════════════════════════════════════════════
+const KEYS = { SETTINGS: 'kal_settings', LOG: 'kal_log', FAVORITES: 'kal_favs', WEIGHT: 'kal_weight' };
+
+const DEFAULT_SETTINGS = { kcal: 2000, protein: 150, carbs: 220, fat: 65 };
+
+function loadSettings() {
+  try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(KEYS.SETTINGS) || '{}') }; }
+  catch { return { ...DEFAULT_SETTINGS }; }
+}
+function saveSettingsData(s) { localStorage.setItem(KEYS.SETTINGS, JSON.stringify(s)); }
+
+function loadLog() {
+  try { return JSON.parse(localStorage.getItem(KEYS.LOG) || '{}'); }
+  catch { return {}; }
+}
+function saveLogData(log) { localStorage.setItem(KEYS.LOG, JSON.stringify(log)); }
+
+function loadFavorites() {
+  try { return JSON.parse(localStorage.getItem(KEYS.FAVORITES) || '[]'); }
+  catch { return []; }
+}
+function saveFavorites(favs) { localStorage.setItem(KEYS.FAVORITES, JSON.stringify(favs)); }
+function isFavorite(name) { return loadFavorites().some(f => f.name === name); }
+function toggleFavorite(food) {
+  let favs = loadFavorites();
+  const idx = favs.findIndex(f => f.name === food.name);
+  if (idx >= 0) { favs.splice(idx, 1); showToast('Favorit entfernt', '#64748b'); }
+  else { favs.unshift({ ...food, isFav: true }); showToast('❤️ Als Favorit gespeichert', '#e11d48'); }
+  saveFavorites(favs);
+}
+
+function loadWeightLog() {
+  try { return JSON.parse(localStorage.getItem(KEYS.WEIGHT) || '[]'); }
+  catch { return []; }
+}
+function saveWeightLog(log) { localStorage.setItem(KEYS.WEIGHT, JSON.stringify(log)); }
+function addWeightEntry(kg) {
+  const log = loadWeightLog();
+  const today = getToday();
+  const filtered = log.filter(e => e.date !== today);
+  filtered.unshift({ date: today, kg });
+  saveWeightLog(filtered.slice(0, 90));
+}
+function deleteWeightEntry(date) {
+  saveWeightLog(loadWeightLog().filter(e => e.date !== date));
+}
+
+function getToday() { return new Date().toISOString().slice(0, 10); }
+
+function getTodayMeals() { return loadLog()[getToday()] || []; }
+
+function addMealToLog(meal) {
+  const log = loadLog();
+  const d = getToday();
+  if (!log[d]) log[d] = [];
+  log[d].unshift({ id: Date.now() + Math.random(), ...meal });
+  saveLogData(log);
+}
+
+function deleteMealFromLog(id) {
+  const log = loadLog();
+  const d = getToday();
+  if (log[d]) { log[d] = log[d].filter(m => m.id !== id); saveLogData(log); }
+}
+
+function getTotals(meals) {
+  return meals.reduce((a, m) => ({
+    kcal:    a.kcal    + (+m.kcal    || 0),
+    protein: a.protein + (+m.protein || 0),
+    carbs:   a.carbs   + (+m.carbs   || 0),
+    fat:     a.fat     + (+m.fat     || 0),
+  }), { kcal: 0, protein: 0, carbs: 0, fat: 0 });
+}
+
+// ═══════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════
+const S = {
+  view: 'dashboard',
+  settings: loadSettings(),
+  settingsForm: loadSettings(),
+  searchQuery: '',
+  searchResults: [],
+  searchState: 'idle', // idle | loading | done | error
+  searchError: '',
+  selectedFoodIdx: -1,
+  selectedGrams: 100,
+  showFoodModal: false,
+  showManualModal: false,
+  manualForm: { name: '', kcal: '', protein: '', carbs: '', fat: '', grams: '' },
+  apiLoading: false,
+  settingsMode: 'g', // 'g' | 'pct'
+};
+
+// ═══════════════════════════════════════════════════════════
+//  LOKALE LEBENSMITTEL-DATENBANK (natürliche & Grundzutaten)
+//  Alle Werte pro 100 g, Quellen: DGE / Bundeslebensmittelschlüssel
+// ═══════════════════════════════════════════════════════════
+const NATURAL_FOODS = [
+  // ── Gemüse ──────────────────────────────────────────────
+  { name:'Paprika rot',        tags:'paprika gemüse',         kcal100:31,  protein100:1.0, carbs100:6.0,  fat100:0.3 },
+  { name:'Paprika gelb',       tags:'paprika gemüse',         kcal100:27,  protein100:1.0, carbs100:5.3,  fat100:0.2 },
+  { name:'Paprika grün',       tags:'paprika gemüse',         kcal100:20,  protein100:0.9, carbs100:3.6,  fat100:0.2 },
+  { name:'Gurke',              tags:'gurke gemüse',           kcal100:12,  protein100:0.6, carbs100:1.8,  fat100:0.1 },
+  { name:'Tomate',             tags:'tomate gemüse',          kcal100:18,  protein100:0.9, carbs100:3.1,  fat100:0.2 },
+  { name:'Cocktailtomate',     tags:'tomate gemüse cherry',   kcal100:18,  protein100:0.9, carbs100:3.3,  fat100:0.2 },
+  { name:'Karotte',            tags:'möhre karotte gemüse',   kcal100:41,  protein100:0.9, carbs100:7.7,  fat100:0.2 },
+  { name:'Brokkoli',           tags:'brokkoli gemüse',        kcal100:34,  protein100:2.8, carbs100:4.0,  fat100:0.4 },
+  { name:'Blumenkohl',         tags:'blumenkohl gemüse',      kcal100:25,  protein100:1.9, carbs100:3.8,  fat100:0.3 },
+  { name:'Spinat',             tags:'spinat gemüse',          kcal100:23,  protein100:2.9, carbs100:0.4,  fat100:0.4 },
+  { name:'Kopfsalat',          tags:'salat kopfsalat gemüse', kcal100:13,  protein100:1.3, carbs100:1.0,  fat100:0.2 },
+  { name:'Rucola',             tags:'rucola salat gemüse',    kcal100:25,  protein100:2.6, carbs100:2.0,  fat100:0.7 },
+  { name:'Eisbergsalat',       tags:'eisberg salat gemüse',   kcal100:14,  protein100:0.9, carbs100:1.9,  fat100:0.1 },
+  { name:'Zucchini',           tags:'zucchini gemüse',        kcal100:17,  protein100:1.2, carbs100:1.8,  fat100:0.2 },
+  { name:'Aubergine',          tags:'aubergine gemüse',       kcal100:25,  protein100:1.0, carbs100:3.5,  fat100:0.2 },
+  { name:'Zwiebel',            tags:'zwiebel gemüse',         kcal100:40,  protein100:1.1, carbs100:7.7,  fat100:0.1 },
+  { name:'Rote Zwiebel',       tags:'zwiebel rot gemüse',     kcal100:40,  protein100:1.1, carbs100:8.0,  fat100:0.1 },
+  { name:'Knoblauch',          tags:'knoblauch gemüse',       kcal100:149, protein100:6.4, carbs100:26.0, fat100:0.5 },
+  { name:'Kartoffel',          tags:'kartoffel gemüse',       kcal100:77,  protein100:2.0, carbs100:15.4, fat100:0.1 },
+  { name:'Süßkartoffel',       tags:'süßkartoffel yam',       kcal100:86,  protein100:1.6, carbs100:20.1, fat100:0.1 },
+  { name:'Rote Bete',          tags:'rote bete gemüse',       kcal100:43,  protein100:1.6, carbs100:8.0,  fat100:0.2 },
+  { name:'Erbsen (grün)',      tags:'erbsen gemüse',          kcal100:81,  protein100:5.4, carbs100:11.3, fat100:0.4 },
+  { name:'Grüne Bohnen',       tags:'bohnen gemüse',          kcal100:31,  protein100:1.8, carbs100:5.0,  fat100:0.1 },
+  { name:'Mais',               tags:'mais gemüse',            kcal100:86,  protein100:3.2, carbs100:16.7, fat100:1.4 },
+  { name:'Champignons',        tags:'pilze champignons',      kcal100:22,  protein100:3.1, carbs100:0.3,  fat100:0.3 },
+  { name:'Sellerie (Stange)',  tags:'sellerie stangensellerie',kcal100:18,  protein100:0.7, carbs100:2.4,  fat100:0.2 },
+  { name:'Lauch',              tags:'lauch porree gemüse',    kcal100:61,  protein100:1.5, carbs100:12.4, fat100:0.3 },
+  { name:'Kürbis',             tags:'kürbis gemüse',          kcal100:26,  protein100:1.0, carbs100:6.5,  fat100:0.1 },
+  { name:'Spargel',            tags:'spargel gemüse',         kcal100:20,  protein100:2.2, carbs100:1.5,  fat100:0.1 },
+  { name:'Radieschen',         tags:'radieschen gemüse',      kcal100:16,  protein100:0.7, carbs100:2.4,  fat100:0.1 },
+  { name:'Kohlrabi',           tags:'kohlrabi gemüse',        kcal100:27,  protein100:1.7, carbs100:3.5,  fat100:0.2 },
+  { name:'Rotkohl',            tags:'rotkohl kohl gemüse',    kcal100:31,  protein100:1.5, carbs100:5.7,  fat100:0.2 },
+  { name:'Weißkohl',           tags:'weißkohl kohl gemüse',   kcal100:25,  protein100:1.3, carbs100:4.2,  fat100:0.2 },
+  { name:'Chinakohl',          tags:'chinakohl kohl gemüse',  kcal100:13,  protein100:1.2, carbs100:1.6,  fat100:0.2 },
+  { name:'Feldsalat',          tags:'feldsalat salat gemüse', kcal100:19,  protein100:1.8, carbs100:0.8,  fat100:0.4 },
+  { name:'Pak Choi',           tags:'pak choi gemüse asiatisch',kcal100:13, protein100:1.5, carbs100:1.0, fat100:0.2 },
+  { name:'Fenchel',            tags:'fenchel gemüse',         kcal100:31,  protein100:1.2, carbs100:5.5,  fat100:0.2 },
+  // ── Obst ────────────────────────────────────────────────
+  { name:'Apfel',              tags:'apfel obst',             kcal100:52,  protein100:0.3, carbs100:12.3, fat100:0.2 },
+  { name:'Banane',             tags:'banane obst',            kcal100:89,  protein100:1.1, carbs100:20.2, fat100:0.3 },
+  { name:'Orange',             tags:'orange obst zitrus',     kcal100:47,  protein100:0.9, carbs100:10.5, fat100:0.1 },
+  { name:'Erdbeeren',          tags:'erdbeere obst beeren',   kcal100:32,  protein100:0.7, carbs100:6.1,  fat100:0.3 },
+  { name:'Blaubeeren',         tags:'blaubeere obst beeren',  kcal100:57,  protein100:0.7, carbs100:11.8, fat100:0.3 },
+  { name:'Himbeeren',          tags:'himbeere obst beeren',   kcal100:52,  protein100:1.2, carbs100:9.0,  fat100:0.7 },
+  { name:'Kirschen',           tags:'kirsche obst',           kcal100:63,  protein100:1.1, carbs100:14.2, fat100:0.2 },
+  { name:'Trauben',            tags:'traube obst weintraube', kcal100:69,  protein100:0.6, carbs100:17.2, fat100:0.2 },
+  { name:'Mango',              tags:'mango obst',             kcal100:60,  protein100:0.8, carbs100:13.7, fat100:0.4 },
+  { name:'Ananas',             tags:'ananas obst',            kcal100:50,  protein100:0.5, carbs100:11.7, fat100:0.1 },
+  { name:'Wassermelone',       tags:'melone wassermelone obst',kcal100:30,  protein100:0.6, carbs100:6.4,  fat100:0.2 },
+  { name:'Melone (Honig)',     tags:'melone obst honigmelone',kcal100:36,  protein100:0.9, carbs100:8.2,  fat100:0.1 },
+  { name:'Pfirsich',           tags:'pfirsich obst',          kcal100:39,  protein100:0.9, carbs100:8.4,  fat100:0.3 },
+  { name:'Birne',              tags:'birne obst',             kcal100:57,  protein100:0.4, carbs100:13.0, fat100:0.1 },
+  { name:'Kiwi',               tags:'kiwi obst',              kcal100:61,  protein100:1.1, carbs100:12.0, fat100:0.5 },
+  { name:'Grapefruit',         tags:'grapefruit obst zitrus', kcal100:42,  protein100:0.8, carbs100:9.0,  fat100:0.1 },
+  { name:'Avocado',            tags:'avocado obst',           kcal100:160, protein100:2.0, carbs100:0.9,  fat100:14.7},
+  { name:'Zitrone',            tags:'zitrone obst zitrus',    kcal100:29,  protein100:1.1, carbs100:5.1,  fat100:0.3 },
+  { name:'Pflaume',            tags:'pflaume obst',           kcal100:46,  protein100:0.7, carbs100:10.5, fat100:0.3 },
+  { name:'Aprikose',           tags:'aprikose obst',          kcal100:48,  protein100:1.4, carbs100:9.1,  fat100:0.4 },
+  { name:'Heidelbeeren',       tags:'heidelbeere blaubeere beeren',kcal100:57,protein100:0.7,carbs100:11.8,fat100:0.3},
+  // ── Fleisch & Fisch ─────────────────────────────────────
+  { name:'Hähnchenbrust',      tags:'hähnchen hühnchen fleisch protein',kcal100:165,protein100:31.0,carbs100:0.0,fat100:3.6},
+  { name:'Hähnchen Oberschenkel',tags:'hähnchen fleisch',     kcal100:209,protein100:26.0,carbs100:0.0,fat100:11.0},
+  { name:'Rinderhack (20% Fett)',tags:'hackfleisch rind fleisch',kcal100:262,protein100:17.0,carbs100:0.0,fat100:21.0},
+  { name:'Rinderhack (5% Fett)', tags:'hackfleisch rind fleisch mager',kcal100:175,protein100:20.0,carbs100:0.0,fat100:10.0},
+  { name:'Rinderfilet',        tags:'rind filet fleisch steak',kcal100:158,protein100:22.0,carbs100:0.0,fat100:7.4},
+  { name:'Lachs',              tags:'lachs fisch meeresfrüchte',kcal100:208,protein100:20.0,carbs100:0.0,fat100:13.4},
+  { name:'Thunfisch (Dose, Wasser)',tags:'thunfisch fisch dose',kcal100:116,protein100:26.0,carbs100:0.0,fat100:0.8},
+  { name:'Kabeljau',           tags:'kabeljau dorsch fisch',  kcal100:82,  protein100:18.0,carbs100:0.0,fat100:0.7},
+  { name:'Garnelen',           tags:'garnelen shrimp meeresfrüchte',kcal100:99,protein100:20.0,carbs100:0.3,fat100:1.5},
+  // ── Eier & Milchprodukte ────────────────────────────────
+  { name:'Ei (Hühnerei)',      tags:'ei eier protein',        kcal100:155, protein100:13.0,carbs100:1.1, fat100:10.6},
+  { name:'Eiweiß',             tags:'ei eiweiß protein',      kcal100:52,  protein100:11.0,carbs100:0.7, fat100:0.2},
+  { name:'Eigelb',             tags:'ei eigelb',              kcal100:339, protein100:16.0,carbs100:0.6, fat100:30.9},
+  { name:'Vollmilch (3,5%)',   tags:'milch vollmilch',        kcal100:61,  protein100:3.3, carbs100:4.7, fat100:3.3},
+  { name:'Milch (1,5%)',       tags:'milch fettarme',         kcal100:46,  protein100:3.5, carbs100:4.8, fat100:1.5},
+  { name:'Magerquark',         tags:'quark magerquark protein',kcal100:67,  protein100:12.0,carbs100:4.3, fat100:0.3},
+  { name:'Speisequark (20%)',  tags:'quark speisequark',      kcal100:110, protein100:11.0,carbs100:4.0, fat100:5.1},
+  { name:'Griechischer Joghurt (10%)',tags:'joghurt griechisch',kcal100:133,protein100:6.4,carbs100:4.0,fat100:10.2},
+  { name:'Naturjoghurt (3,5%)',tags:'joghurt natur',          kcal100:61,  protein100:3.5, carbs100:4.7, fat100:3.3},
+  { name:'Skyr',               tags:'skyr joghurt island protein',kcal100:65,protein100:11.0,carbs100:4.0,fat100:0.2},
+  { name:'Hüttenkäse',         tags:'hüttenkäse cottage cheese',kcal100:98, protein100:11.1,carbs100:3.4,fat100:4.3},
+  { name:'Mozzarella',         tags:'mozzarella käse',        kcal100:280, protein100:18.0,carbs100:2.2, fat100:22.0},
+  { name:'Gouda',              tags:'gouda käse',             kcal100:356, protein100:25.0,carbs100:0.5, fat100:27.4},
+  { name:'Frischkäse',         tags:'frischkäse käse',        kcal100:260, protein100:6.4, carbs100:3.4, fat100:24.0},
+  // ── Hülsenfrüchte ───────────────────────────────────────
+  { name:'Linsen (gekocht)',   tags:'linsen hülsenfrüchte protein',kcal100:116,protein100:9.0,carbs100:20.1,fat100:0.4},
+  { name:'Kichererbsen (gekocht)',tags:'kichererbsen hülsenfrüchte',kcal100:164,protein100:8.9,carbs100:27.4,fat100:2.6},
+  { name:'Schwarze Bohnen (gekocht)',tags:'bohnen schwarz hülsenfrüchte',kcal100:132,protein100:8.9,carbs100:22.8,fat100:0.5},
+  { name:'Tofu (natur)',       tags:'tofu soja protein vegetarisch vegan',kcal100:76,protein100:8.0,carbs100:1.9,fat100:4.2},
+  { name:'Edamame',            tags:'edamame soja bohnen',    kcal100:122, protein100:11.9,carbs100:7.6, fat100:5.2},
+  // ── Getreide & Kohlenhydrate ────────────────────────────
+  { name:'Haferflocken',       tags:'hafer oats frühstück',   kcal100:389, protein100:16.9,carbs100:66.3,fat100:6.9},
+  { name:'Reis (roh)',         tags:'reis rohgewicht',        kcal100:365, protein100:7.1, carbs100:78.1,fat100:0.7},
+  { name:'Reis (gekocht)',     tags:'reis gekocht',           kcal100:130, protein100:2.7, carbs100:28.2,fat100:0.3},
+  { name:'Basmati Reis (roh)', tags:'basmati reis',           kcal100:349, protein100:8.5, carbs100:77.0,fat100:0.5},
+  { name:'Nudeln (roh)',       tags:'pasta nudeln rohgewicht',kcal100:371, protein100:13.0,carbs100:72.0,fat100:1.5},
+  { name:'Nudeln (gekocht)',   tags:'pasta nudeln gekocht',   kcal100:131, protein100:5.0, carbs100:25.0,fat100:0.5},
+  { name:'Vollkornnudeln (roh)',tags:'nudeln pasta vollkorn', kcal100:352, protein100:13.4,carbs100:63.6,fat100:2.5},
+  { name:'Vollkornbrot',       tags:'brot vollkorn',          kcal100:247, protein100:9.0, carbs100:42.0,fat100:3.5},
+  { name:'Toastbrot',          tags:'toast brot weizen',      kcal100:265, protein100:8.5, carbs100:50.0,fat100:3.2},
+  // ── Nüsse & Fette ───────────────────────────────────────
+  { name:'Mandeln',            tags:'mandeln nüsse',          kcal100:579, protein100:21.2,carbs100:9.5, fat100:49.9},
+  { name:'Walnüsse',           tags:'walnüsse nüsse',         kcal100:654, protein100:15.2,carbs100:6.7, fat100:65.2},
+  { name:'Cashewkerne',        tags:'cashew nüsse',           kcal100:553, protein100:18.2,carbs100:22.5,fat100:43.8},
+  { name:'Erdnüsse',           tags:'erdnüsse nüsse',         kcal100:567, protein100:25.8,carbs100:7.3, fat100:49.2},
+  { name:'Erdnussbutter',      tags:'erdnussbutter peanut butter',kcal100:588,protein100:25.0,carbs100:13.8,fat100:50.4},
+  { name:'Olivenöl',           tags:'olivenöl öl fett',       kcal100:884, protein100:0.0, carbs100:0.0, fat100:100.0},
+  { name:'Kokosöl',            tags:'kokosöl öl fett',        kcal100:862, protein100:0.0, carbs100:0.0, fat100:99.1},
+  { name:'Butter',             tags:'butter fett',            kcal100:717, protein100:0.7, carbs100:0.6, fat100:81.1},
+  { name:'Chiasamen',          tags:'chia samen superfood',   kcal100:486, protein100:17.0,carbs100:7.7, fat100:31.0},
+  { name:'Leinsamen',          tags:'leinsamen samen',        kcal100:534, protein100:18.3,carbs100:1.6, fat100:42.2},
+  { name:'Sonnenblumenkerne',  tags:'sonnenblumenkerne samen',kcal100:584, protein100:20.8,carbs100:11.4,fat100:51.5},
+].map(f => ({ ...f, local: true, brand: '', serving: 100 }));
+
+// ═══════════════════════════════════════════════════════════
+//  LOKALE SUCHE
+// ═══════════════════════════════════════════════════════════
+function searchLocalFoods(query) {
+  const q = query.toLowerCase().trim();
+  const terms = q.split(/\s+/);
+  return NATURAL_FOODS
+    .map(food => {
+      const haystack = (food.name + ' ' + food.tags).toLowerCase();
+      const score = terms.reduce((s, t) => {
+        if (food.name.toLowerCase().startsWith(t)) return s + 3;
+        if (food.name.toLowerCase().includes(t))   return s + 2;
+        if (haystack.includes(t))                  return s + 1;
+        return s;
+      }, 0);
+      return { food, score };
+    })
+    .filter(x => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .map(x => x.food);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  OPEN FOOD FACTS API
+// ═══════════════════════════════════════════════════════════
+async function searchFoods(query) {
+  const url = `https://world.openfoodfacts.org/cgi/search.pl?`
+    + `search_terms=${encodeURIComponent(query)}&json=1&page_size=20`
+    + `&fields=product_name,brands,nutriments,serving_quantity`;
+  const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  const d = await r.json();
+  return (d.products || [])
+    .filter(p => {
+      const n = p.nutriments;
+      return p.product_name && n &&
+        (n['energy-kcal_100g'] != null || n['energy_100g'] != null);
+    })
+    .map(p => {
+      const n = p.nutriments;
+      const kcal100 = +(n['energy-kcal_100g'] ?? (n['energy_100g'] ?? 0) / 4.184).toFixed(1);
+      return {
+        name:      p.product_name.trim(),
+        brand:     (p.brands || '').split(',')[0].trim(),
+        kcal100,
+        protein100: +(n.proteins_100g        || 0).toFixed(1),
+        carbs100:   +(n.carbohydrates_100g   || 0).toFixed(1),
+        fat100:     +(n.fat_100g             || 0).toFixed(1),
+        serving:    +(p.serving_quantity     || 100),
+      };
+    });
+}
+
+// ═══════════════════════════════════════════════════════════
+//  TOAST
+// ═══════════════════════════════════════════════════════════
+function showToast(msg, color = '#4f46e5') {
+  const el = document.createElement('div');
+  el.className = 'toast-enter text-white text-sm font-semibold px-5 py-3 rounded-2xl shadow-2xl';
+  el.style.background = color;
+  el.textContent = msg;
+  const c = document.getElementById('toast-container');
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 2400);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  HELPERS
+// ═══════════════════════════════════════════════════════════
+function h(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function num(n, dec = 0) { return dec ? +(+n).toFixed(dec) : Math.round(+n); }
+function pct(v, max) { return Math.min(v / Math.max(max, 1), 1); }
+
+function $(id) { return document.getElementById(id); }
+
+// ═══════════════════════════════════════════════════════════
+//  RENDER ENGINE
+// ═══════════════════════════════════════════════════════════
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML =
+    renderView()
+    + renderBottomNav()
+    + (S.showFoodModal   ? renderFoodModal()   : '')
+    + (S.showManualModal ? renderManualModal() : '');
+  bind();
+}
+
+// ─── VIEWS ─────────────────────────────────────────────────
+function renderView() {
+  if (S.view === 'dashboard') return renderDashboard();
+  if (S.view === 'search')    return renderSearch();
+  if (S.view === 'settings')  return renderSettings();
+  if (S.view === 'weight')    return renderWeightView();
+  return '';
+}
+
+// ─── DASHBOARD ─────────────────────────────────────────────
+function renderDashboard() {
+  const meals   = getTodayMeals();
+  const totals  = getTotals(meals);
+  const sg      = S.settings;
+  const rem     = { kcal: sg.kcal - totals.kcal, protein: sg.protein - totals.protein,
+                    carbs: sg.carbs - totals.carbs, fat: sg.fat - totals.fat };
+  const calPct  = pct(totals.kcal, sg.kcal);
+  const R = 62, C = 2 * Math.PI * R;
+  const off = C * (1 - Math.min(calPct, 1));
+  const ringColor = calPct > 1 ? '#ef4444' : calPct > 0.85 ? '#f59e0b' : '#818cf8';
+  const dateStr = new Date().toLocaleDateString('de-DE', { weekday:'long', day:'numeric', month:'long' });
+
+  return `
+  <div class="flex-1 overflow-y-auto pb-28 pt-safe">
+
+    <!-- Header -->
+    <div class="px-5 pt-6 pb-2 flex items-center justify-between">
+      <div>
+        <p class="text-slate-400 text-xs capitalize tracking-wide">${h(dateStr)}</p>
+        <h1 class="text-2xl font-black mt-0.5 tracking-tight">Übersicht</h1>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-dash-search"
+          class="btn-active bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-2xl p-2.5 shadow-md"
+          title="Lebensmittel suchen">
+          ${iconSearch(20)}
+        </button>
+        <button id="btn-add-fab"
+          class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl px-4 py-2.5 flex items-center gap-2 font-bold text-sm shadow-lg shadow-indigo-900/40">
+          ${iconPlus(16)} Eintrag
+        </button>
+      </div>
+    </div>
+
+    <!-- Calorie Card -->
+    <div class="mx-4 mt-3 bg-gradient-to-br from-slate-800 to-slate-800/60 rounded-3xl p-5 shadow-xl border border-slate-700/40">
+      <div class="flex items-center gap-4">
+        <!-- Ring -->
+        <div class="relative shrink-0">
+          <svg width="148" height="148" viewBox="0 0 148 148">
+            <circle cx="74" cy="74" r="${R}" class="ring-track"/>
+            <circle cx="74" cy="74" r="${R}" class="ring-fill"
+              stroke="${ringColor}"
+              stroke-dasharray="${C.toFixed(2)}"
+              stroke-dashoffset="${off.toFixed(2)}"/>
+            <text x="74" y="68" text-anchor="middle" fill="white" font-size="24"
+              font-weight="900" font-family="-apple-system,sans-serif" letter-spacing="-1">
+              ${num(calPct * 100)}%
+            </text>
+            <text x="74" y="86" text-anchor="middle" fill="#64748b" font-size="11"
+              font-family="-apple-system,sans-serif">konsumiert</text>
+          </svg>
+        </div>
+        <!-- Stats -->
+        <div class="flex-1 min-w-0">
+          <div class="mb-3">
+            <p class="text-slate-400 text-xs mb-0.5">Verbleibend</p>
+            <p class="text-3xl font-black leading-none ${rem.kcal < 0 ? 'text-red-400' : 'text-white'}">
+              ${num(Math.abs(rem.kcal))}
+            </p>
+            <p class="text-slate-500 text-xs mt-0.5">${rem.kcal < 0 ? 'kcal überschritten' : 'kcal übrig'}</p>
+          </div>
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-500">Gegessen</span>
+              <span class="text-indigo-400 font-semibold">${num(totals.kcal)} kcal</span>
+            </div>
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-500">Ziel</span>
+              <span class="text-slate-300 font-semibold">${sg.kcal} kcal</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Macro Bars -->
+    <div class="mx-4 mt-3 grid grid-cols-3 gap-2.5">
+      ${macroCard('Protein',  num(totals.protein,1), sg.protein,  '#818cf8', 'g')}
+      ${macroCard('Kohlenhydr.', num(totals.carbs,1), sg.carbs, '#34d399', 'g')}
+      ${macroCard('Fett',     num(totals.fat,1),    sg.fat,     '#fb923c', 'g')}
+    </div>
+
+    <!-- Meals Section -->
+    <div class="mx-4 mt-5">
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Heutige Mahlzeiten</p>
+      ${meals.length === 0
+        ? `<div class="bg-slate-800/50 rounded-2xl p-8 text-center border border-slate-700/30">
+            <div class="text-4xl mb-2">🥗</div>
+            <p class="text-slate-400 text-sm font-medium">Noch keine Einträge</p>
+            <p class="text-slate-600 text-xs mt-1">Tippe auf „Eintrag" oder suche Lebensmittel</p>
+           </div>`
+        : `<div class="space-y-2 slide-in">${meals.map(renderMealRow).join('')}</div>`
+      }
+    </div>
+
+  </div>`;
+}
+
+function macroCard(label, val, goal, color, unit) {
+  const p = pct(val, goal);
+  const over = val > goal;
+  return `
+  <div class="bg-slate-800/70 rounded-2xl p-3 border border-slate-700/30">
+    <p class="text-slate-500 text-xs mb-2 truncate">${label}</p>
+    <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-2">
+      <div class="macro-fill h-full rounded-full"
+        style="width:${(p*100).toFixed(1)}%;background:${over?'#ef4444':color}"></div>
+    </div>
+    <p class="font-black text-base leading-none" style="color:${over?'#ef4444':color}">${val}<span class="text-xs font-normal text-slate-500">${unit}</span></p>
+    <p class="text-slate-600 text-xs mt-0.5">/ ${goal}${unit}</p>
+  </div>`;
+}
+
+function renderMealRow(m) {
+  return `
+  <div class="bg-slate-800/70 rounded-2xl px-4 py-3.5 flex items-center gap-3 border border-slate-700/30 slide-in">
+    <div class="flex-1 min-w-0">
+      <p class="font-semibold text-sm leading-snug truncate">${h(m.name)}</p>
+      <p class="text-slate-500 text-xs mt-0.5">${m.grams ? m.grams+'g · ' : ''}${num(m.kcal)} kcal</p>
+      <div class="flex gap-3 mt-1.5">
+        <span class="text-xs text-indigo-400 font-medium">P ${num(m.protein,1)}g</span>
+        <span class="text-xs text-emerald-400 font-medium">K ${num(m.carbs,1)}g</span>
+        <span class="text-xs text-orange-400 font-medium">F ${num(m.fat,1)}g</span>
+      </div>
+    </div>
+    <button data-del="${m.id}"
+      class="btn-active text-slate-600 hover:text-red-400 p-2 rounded-xl hover:bg-red-400/10 transition-colors">
+      ${iconTrash(18)}
+    </button>
+  </div>`;
+}
+
+// ─── SEARCH ────────────────────────────────────────────────
+function renderSearch() {
+  let content = '';
+  if (S.searchState === 'loading') {
+    content = `<div class="flex flex-col items-center justify-center py-20 gap-4">
+      <div class="w-10 h-10 rounded-full border-2 border-indigo-500 border-t-transparent spin"></div>
+      <p class="text-slate-400 text-sm">Suche läuft…</p>
+    </div>`;
+  } else if (S.searchState === 'error') {
+    content = `<div class="mx-4 bg-red-500/10 border border-red-500/20 rounded-2xl p-5 text-center">
+      <p class="text-red-400 font-semibold text-sm">Verbindungsfehler</p>
+      <p class="text-slate-500 text-xs mt-1">${h(S.searchError)}</p>
+    </div>`;
+  } else if (S.searchState === 'done' && S.searchResults.length === 0) {
+    content = `<div class="text-center py-16">
+      <div class="text-4xl mb-3">🔍</div>
+      <p class="text-slate-400 font-medium">Keine Ergebnisse</p>
+      <p class="text-slate-600 text-xs mt-1">Versuche einen anderen Begriff</p>
+    </div>`;
+  } else if (S.searchResults.length > 0) {
+    const apiBar = S.apiLoading
+      ? `<div class="flex items-center gap-2 px-4 py-2 text-slate-500 text-xs">
+           <div class="w-3.5 h-3.5 rounded-full border border-indigo-500 border-t-transparent spin shrink-0"></div>
+           Online-Datenbank wird durchsucht…
+         </div>`
+      : (S.searchError
+          ? `<div class="mx-4 mb-2 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2 text-amber-400 text-xs">${h(S.searchError)}</div>`
+          : '');
+    const hasFavs  = S.searchResults.some(f => f.isFav);
+    const hasLocal = S.searchResults.some(f => f.local && !f.isFav);
+    const hasApi   = S.searchResults.some(f => !f.local && !f.isFav);
+    const sepLocal = hasFavs && hasLocal
+      ? `<div class="px-4 pt-3 pb-1"><p class="text-xs font-bold text-slate-600 uppercase tracking-widest">Lokale Datenbank</p></div>`
+      : (!hasFavs && hasLocal ? `<div class="px-4 pb-1"><p class="text-xs font-bold text-slate-600 uppercase tracking-widest">Lokale Datenbank</p></div>` : '');
+    const sep = hasApi
+      ? `<div class="px-4 pt-3 pb-1"><p class="text-xs font-bold text-slate-600 uppercase tracking-widest">Online-Ergebnisse</p></div>`
+      : '';
+    content = `<div class="pb-4 slide-in">
+      ${hasFavs ? `<div class="px-4 pb-1"><p class="text-xs font-bold text-rose-500/80 uppercase tracking-widest">❤️ Favoriten</p></div>` : ''}
+      <div class="px-4 space-y-2">${S.searchResults.filter(f=>f.isFav).map(renderFoodCard).join('')}</div>
+      ${sepLocal}
+      <div class="px-4 space-y-2">${S.searchResults.filter(f=>f.local&&!f.isFav).map(renderFoodCard).join('')}</div>
+      ${sep}
+      <div class="px-4 space-y-2 mt-2">${S.searchResults.filter(f=>!f.local&&!f.isFav).map(renderFoodCard).join('')}</div>
+      ${apiBar}
+    </div>`;
+  } else if (S.apiLoading) {
+    content = `<div class="flex flex-col items-center justify-center py-20 gap-4">
+      <div class="w-10 h-10 rounded-full border-2 border-indigo-500 border-t-transparent spin"></div>
+      <p class="text-slate-400 text-sm">Suche läuft…</p>
+    </div>`;
+  } else {
+    const allFavs = loadFavorites();
+    const favSection = allFavs.length > 0
+      ? `<div class="pb-4 slide-in">
+          <div class="px-4 pb-1"><p class="text-xs font-bold text-rose-500/80 uppercase tracking-widest">❤️ Favoriten</p></div>
+          <div class="px-4 space-y-2">${allFavs.map(f => renderFavCard(f)).join('')}</div>
+         </div>`
+      : '';
+    content = favSection + `<div class="text-center py-10 px-8">
+      <div class="text-5xl mb-3">🥦</div>
+      <p class="text-slate-300 font-bold text-base">Lebensmittel suchen</p>
+      <p class="text-slate-500 text-sm mt-2 leading-relaxed">Tippe oben und suche in der lokalen DB + Open Food Facts</p>
+    </div>`;
+  }
+
+  return `
+  <div class="flex-1 overflow-y-auto pb-28 pt-safe">
+    <div class="px-4 pt-6 pb-4">
+      <h1 class="text-2xl font-black tracking-tight mb-4">Lebensmittel suchen</h1>
+      <div class="relative">
+        <input id="search-input" type="search" inputmode="search" autocomplete="off"
+          placeholder="z.B. Hähnchenbrust, Vollkornbrot…"
+          value="${h(S.searchQuery)}"
+          class="w-full bg-slate-800 border border-slate-700 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 rounded-2xl px-5 py-3.5 pr-14 text-white placeholder-slate-600 outline-none transition-all text-sm"/>
+        <button id="btn-search"
+          class="btn-active absolute right-2.5 top-1/2 -translate-y-1/2 bg-indigo-600 hover:bg-indigo-500 rounded-xl p-2.5 transition-colors">
+          ${iconSearch(18)}
+        </button>
+      </div>
+      <p class="text-xs text-slate-600 mt-2 ml-1">Daten von Open Food Facts (CC BY-SA)</p>
+    </div>
+    ${content}
+  </div>`;
+}
+
+function renderFoodCard(food, _unused) {
+  const idx = S.searchResults.indexOf(food);
+  const fav = isFavorite(food.name);
+  const badge = food.local
+    ? `<span class="inline-flex items-center gap-0.5 text-xs bg-emerald-500/15 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-lg font-semibold">🌿 Natürlich</span>`
+    : '';
+  const favBadge = food.isFav
+    ? `<span class="inline-flex items-center gap-0.5 text-xs bg-rose-500/15 text-rose-400 border border-rose-500/20 px-1.5 py-0.5 rounded-lg font-semibold">❤️ Favorit</span>`
+    : '';
+  return `
+  <div class="bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30">
+    <div class="flex items-start gap-3">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap mb-0.5">
+          <p class="font-semibold text-sm leading-snug">${h(food.name)}</p>
+          ${badge}${favBadge}
+        </div>
+        ${food.brand ? `<p class="text-slate-500 text-xs">${h(food.brand)}</p>` : ''}
+        <div class="flex flex-wrap gap-x-3 gap-y-1 mt-2">
+          <span class="text-xs font-bold text-amber-400">${food.kcal100} kcal</span>
+          <span class="text-xs text-indigo-400">P ${food.protein100}g</span>
+          <span class="text-xs text-emerald-400">K ${food.carbs100}g</span>
+          <span class="text-xs text-orange-400">F ${food.fat100}g</span>
+        </div>
+        <p class="text-slate-700 text-xs mt-1">pro 100 g</p>
+      </div>
+      <div class="flex flex-col gap-2 shrink-0">
+        <button data-fav-idx="${idx}"
+          class="btn-active rounded-xl w-9 h-9 flex items-center justify-center border transition-colors
+            ${fav ? 'bg-rose-500/20 border-rose-500/30 text-rose-400' : 'bg-slate-700 border-slate-600 text-slate-500 hover:text-rose-400'}">
+          ${iconHeart(16, fav)}
+        </button>
+        <button data-add-idx="${idx}"
+          class="btn-active bg-indigo-600 hover:bg-indigo-500 rounded-xl w-9 h-9 flex items-center justify-center shadow-md shadow-indigo-900/40">
+          ${iconPlus(18)}
+        </button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ─── SETTINGS ──────────────────────────────────────────────
+function renderSettings() {
+  const sf = S.settingsForm;
+  const pct = S.settingsMode === 'pct';
+  const kcal = sf.kcal || 1;
+  const log = loadLog();
+  const days = Object.keys(log);
+  const allMeals = Object.values(log).flat();
+  const avgKcal = allMeals.length && days.length
+    ? Math.round(allMeals.reduce((a,m) => a + (+m.kcal||0), 0) / days.length) : 0;
+
+  // Werte für die Anzeige (g oder %)
+  const dispProtein = pct ? Math.round(sf.protein * 4 / kcal * 100) : sf.protein;
+  const dispCarbs   = pct ? Math.round(sf.carbs   * 4 / kcal * 100) : sf.carbs;
+  const dispFat     = pct ? Math.round(sf.fat     * 9 / kcal * 100) : sf.fat;
+  const totalPct    = pct ? dispProtein + dispCarbs + dispFat : null;
+  const pctWarn     = totalPct !== null && Math.abs(totalPct - 100) > 2;
+
+  return `
+  <div class="flex-1 overflow-y-auto pb-28 pt-safe">
+    <div class="px-5 pt-6 pb-4">
+      <h1 class="text-2xl font-black tracking-tight mb-0.5">Tagesziele</h1>
+      <p class="text-slate-500 text-sm">Passe deine täglichen Nährwertziele an</p>
+    </div>
+
+    <!-- Goals Card -->
+    <div class="mx-4 bg-slate-800/70 rounded-3xl p-5 border border-slate-700/30 space-y-4">
+      ${settingsRow('Kalorien', 'kcal', sf.kcal, 'kcal', '#fbbf24', 0)}
+      <div class="flex items-center justify-between">
+        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Makros</p>
+        <div class="flex bg-slate-900 rounded-xl p-0.5 gap-0.5">
+          <button id="sfm-g"
+            class="btn-active px-3 py-1 rounded-lg text-xs font-bold transition-colors
+              ${!pct ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}">
+            g
+          </button>
+          <button id="sfm-pct"
+            class="btn-active px-3 py-1 rounded-lg text-xs font-bold transition-colors
+              ${pct ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}">
+            %
+          </button>
+        </div>
+      </div>
+      ${pct ? `<p class="text-xs text-slate-500 -mt-2">Eingabe in %, wird automatisch in Gramm umgerechnet</p>` : ''}
+      ${settingsRow('Protein',       'protein', dispProtein, pct ? '%' : 'g', '#818cf8', 4)}
+      ${settingsRow('Kohlenhydrate', 'carbs',   dispCarbs,   pct ? '%' : 'g', '#34d399', 4)}
+      ${settingsRow('Fett',          'fat',     dispFat,     pct ? '%' : 'g', '#fb923c', 9)}
+      ${pct ? `
+      <div class="bg-slate-900/60 rounded-2xl px-4 py-3 text-xs space-y-1">
+        <div class="flex justify-between">
+          <span class="text-slate-500">Summe</span>
+          <span class="font-bold ${pctWarn ? 'text-amber-400' : 'text-emerald-400'}">${totalPct}%  ${pctWarn ? '⚠️ ≠ 100%' : '✓'}</span>
+        </div>
+        <div class="flex justify-between text-slate-600">
+          <span>→ Protein</span><span>${sf.protein} g</span>
+        </div>
+        <div class="flex justify-between text-slate-600">
+          <span>→ Kohlenhydrate</span><span>${sf.carbs} g</span>
+        </div>
+        <div class="flex justify-between text-slate-600">
+          <span>→ Fett</span><span>${sf.fat} g</span>
+        </div>
+      </div>` : ''}
+    </div>
+
+    <div class="mx-4 mt-3">
+      <button id="btn-save-settings"
+        class="btn-active w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-2xl text-base shadow-lg shadow-indigo-900/30 transition-colors">
+        Ziele speichern
+      </button>
+    </div>
+
+    <!-- Stats -->
+    <div class="mx-4 mt-5 bg-slate-800/70 rounded-3xl p-5 border border-slate-700/30">
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Statistik</p>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-slate-700/50 rounded-2xl p-3.5">
+          <p class="text-slate-400 text-xs mb-1">Erfasste Tage</p>
+          <p class="text-2xl font-black">${days.length}</p>
+        </div>
+        <div class="bg-slate-700/50 rounded-2xl p-3.5">
+          <p class="text-slate-400 text-xs mb-1">Ø Kcal / Tag</p>
+          <p class="text-2xl font-black text-indigo-400">${avgKcal || '–'}</p>
+        </div>
+        <div class="bg-slate-700/50 rounded-2xl p-3.5">
+          <p class="text-slate-400 text-xs mb-1">Mahlzeiten gesamt</p>
+          <p class="text-2xl font-black text-emerald-400">${allMeals.length}</p>
+        </div>
+        <div class="bg-slate-700/50 rounded-2xl p-3.5">
+          <p class="text-slate-400 text-xs mb-1">Heute</p>
+          <p class="text-2xl font-black text-amber-400">${getTodayMeals().length}</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Danger Zone -->
+    <div class="mx-4 mt-4 mb-4 bg-red-950/20 rounded-3xl p-5 border border-red-900/30">
+      <p class="text-red-400 font-bold text-sm mb-1">Gefahrenzone</p>
+      <p class="text-slate-500 text-xs mb-3">Löscht alle Mahlzeiten und Einstellungen dauerhaft.</p>
+      <button id="btn-reset"
+        class="btn-active w-full bg-red-600/15 hover:bg-red-600/25 text-red-400 font-semibold py-3 rounded-xl text-sm border border-red-600/20 transition-colors">
+        Alle Daten löschen
+      </button>
+    </div>
+  </div>`;
+}
+
+function settingsRow(label, key, val, unit, color, calFactor) {
+  return `
+  <div class="flex items-center justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-2 h-9 rounded-full shrink-0" style="background:${color}"></div>
+      <div>
+        <p class="font-semibold text-sm">${label}</p>
+        <p class="text-slate-600 text-xs">täglich</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 shrink-0">
+      <input type="number" inputmode="decimal" id="sf_${key}" value="${val}" min="0"
+        data-sf="${key}" data-sfcal="${calFactor}"
+        class="w-20 bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-2 py-2 text-center font-bold text-white outline-none text-sm"/>
+      <span class="text-slate-500 text-xs w-8">${unit}</span>
+    </div>
+  </div>`;
+}
+
+// ─── MODALS ─────────────────────────────────────────────────
+function renderFoodModal() {
+  const food = S.searchResults[S.selectedFoodIdx];
+  if (!food) return '';
+  const g = S.selectedGrams;
+  const f = g / 100;
+  return `
+  <div id="food-modal-bg" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end">
+    <div class="modal-enter w-full max-w-md mx-auto bg-slate-800 rounded-t-3xl shadow-2xl border-t border-slate-700/50">
+      <div class="w-10 h-1 bg-slate-600 rounded-full mx-auto mt-4 mb-5"></div>
+      <div class="px-6 pb-6">
+        <h2 class="font-black text-lg leading-snug mb-0.5 line-clamp-2">${h(food.name)}</h2>
+        ${food.brand ? `<p class="text-slate-500 text-sm mb-4">${h(food.brand)}</p>` : '<div class="mb-4"></div>'}
+
+        <!-- Grams picker -->
+        <p class="text-slate-400 text-xs mb-2 font-medium">Menge in Gramm</p>
+        <div class="flex items-center gap-3 mb-5">
+          <button id="btn-g-dec"
+            class="btn-active bg-slate-700 hover:bg-slate-600 w-11 h-11 rounded-xl font-black text-xl transition-colors flex items-center justify-center">−</button>
+          <input type="number" id="grams-inp" inputmode="decimal" value="${g}" min="1" max="9999"
+            class="flex-1 bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl py-3 text-center font-bold text-white outline-none text-base"/>
+          <button id="btn-g-inc"
+            class="btn-active bg-slate-700 hover:bg-slate-600 w-11 h-11 rounded-xl font-black text-xl transition-colors flex items-center justify-center">+</button>
+        </div>
+
+        <!-- Preview grid -->
+        <div id="food-preview" class="grid grid-cols-4 gap-2 bg-slate-700/40 rounded-2xl p-4 mb-5">
+          ${foodPreviewCells(food, f)}
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <button id="btn-modal-cancel"
+            class="btn-active bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3.5 rounded-2xl transition-colors">Abbrechen</button>
+          <button id="btn-modal-add"
+            class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-2xl shadow-lg shadow-indigo-900/30 transition-colors">Hinzufügen</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function foodPreviewCells(food, f) {
+  return `
+    <div class="text-center">
+      <p id="prev-kcal" class="text-amber-400 font-black text-lg">${num(food.kcal100*f)}</p>
+      <p class="text-slate-500 text-xs mt-0.5">kcal</p>
+    </div>
+    <div class="text-center">
+      <p id="prev-prot" class="text-indigo-400 font-black text-lg">${num(food.protein100*f,1)}</p>
+      <p class="text-slate-500 text-xs mt-0.5">Prot. g</p>
+    </div>
+    <div class="text-center">
+      <p id="prev-carb" class="text-emerald-400 font-black text-lg">${num(food.carbs100*f,1)}</p>
+      <p class="text-slate-500 text-xs mt-0.5">KH g</p>
+    </div>
+    <div class="text-center">
+      <p id="prev-fat" class="text-orange-400 font-black text-lg">${num(food.fat100*f,1)}</p>
+      <p class="text-slate-500 text-xs mt-0.5">Fett g</p>
+    </div>`;
+}
+
+function updateFoodPreview() {
+  const food = S.searchResults[S.selectedFoodIdx];
+  if (!food) return;
+  const f = S.selectedGrams / 100;
+  const el = $('food-preview');
+  if (el) el.innerHTML = foodPreviewCells(food, f);
+}
+
+function renderManualModal() {
+  const e = S.manualForm;
+  return `
+  <div id="manual-modal-bg" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end">
+    <div class="modal-enter w-full max-w-md mx-auto bg-slate-800 rounded-t-3xl shadow-2xl border-t border-slate-700/50">
+      <div class="w-10 h-1 bg-slate-600 rounded-full mx-auto mt-4 mb-5"></div>
+      <div class="px-6 pb-6">
+        <h2 class="font-black text-lg mb-4">Manuell hinzufügen</h2>
+        <div class="space-y-3">
+          <div>
+            <label class="text-slate-400 text-xs block mb-1.5 font-medium">Name *</label>
+            <input id="mn-name" type="text" value="${h(e.name)}" placeholder="z.B. Hähnchenbrust gegrillt"
+              class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-4 py-3 text-white outline-none placeholder-slate-600 text-sm"/>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-slate-400 text-xs block mb-1.5 font-medium">Kalorien (kcal) *</label>
+              <input id="mn-kcal" type="number" inputmode="decimal" value="${e.kcal}" placeholder="0" min="0"
+                class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-4 py-3 text-white outline-none text-sm"/>
+            </div>
+            <div>
+              <label class="text-slate-400 text-xs block mb-1.5 font-medium">Menge (g)</label>
+              <input id="mn-grams" type="number" inputmode="decimal" value="${e.grams}" placeholder="z.B. 200" min="0"
+                class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-4 py-3 text-white outline-none text-sm"/>
+            </div>
+          </div>
+          <div class="grid grid-cols-3 gap-2.5">
+            <div>
+              <label class="text-slate-400 text-xs block mb-1.5 font-medium">Protein (g)</label>
+              <input id="mn-protein" type="number" inputmode="decimal" value="${e.protein}" placeholder="0" min="0"
+                class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-3 py-3 text-white outline-none text-sm"/>
+            </div>
+            <div>
+              <label class="text-slate-400 text-xs block mb-1.5 font-medium">KH (g)</label>
+              <input id="mn-carbs" type="number" inputmode="decimal" value="${e.carbs}" placeholder="0" min="0"
+                class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-3 py-3 text-white outline-none text-sm"/>
+            </div>
+            <div>
+              <label class="text-slate-400 text-xs block mb-1.5 font-medium">Fett (g)</label>
+              <input id="mn-fat" type="number" inputmode="decimal" value="${e.fat}" placeholder="0" min="0"
+                class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-3 py-3 text-white outline-none text-sm"/>
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mt-5">
+          <button id="btn-man-cancel"
+            class="btn-active bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3.5 rounded-2xl transition-colors">Abbrechen</button>
+          <button id="btn-man-add"
+            class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-2xl shadow-lg shadow-indigo-900/30 transition-colors">Hinzufügen</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ─── WEIGHT VIEW ────────────────────────────────────────────
+function renderWeightView() {
+  const log = loadWeightLog();
+  const today = getToday();
+  const todayEntry = log.find(e => e.date === today);
+  const recent = log.slice(0, 30);
+
+  // SVG Sparkline chart
+  let chartHtml = '';
+  if (recent.length >= 2) {
+    const reversed = [...recent].reverse();
+    const vals = reversed.map(e => e.kg);
+    const minV = Math.min(...vals) - 0.5;
+    const maxV = Math.max(...vals) + 0.5;
+    const W = 300, H = 80;
+    const toX = i => (i / (vals.length - 1)) * W;
+    const toY = v => H - ((v - minV) / (maxV - minV)) * H;
+    const pts = vals.map((v, i) => `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(' ');
+    const dots = vals.map((v, i) => `<circle cx="${toX(i).toFixed(1)}" cy="${toY(v).toFixed(1)}" r="3.5" fill="#818cf8"/>`).join('');
+    const lastV = vals[vals.length - 1];
+    const firstV = vals[0];
+    const diff = +(lastV - firstV).toFixed(1);
+    const diffColor = diff < 0 ? 'text-emerald-400' : diff > 0 ? 'text-rose-400' : 'text-slate-400';
+    const diffLabel = diff === 0 ? '±0 kg' : (diff > 0 ? `+${diff} kg` : `${diff} kg`);
+    chartHtml = `
+    <div class="mx-4 mt-3 bg-slate-800/70 rounded-3xl p-5 border border-slate-700/30">
+      <div class="flex items-center justify-between mb-4">
+        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Verlauf (${recent.length} Tage)</p>
+        <span class="font-bold text-sm ${diffColor}">${diffLabel}</span>
+      </div>
+      <svg viewBox="0 0 ${W} ${H}" class="w-full" style="height:80px">
+        <polyline points="${pts}" fill="none" stroke="#818cf8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        ${dots}
+      </svg>
+      <div class="flex justify-between text-xs text-slate-600 mt-2">
+        <span>${reversed[0].date.slice(5).replace('-','.')}</span>
+        <span class="font-bold text-indigo-400">${lastV} kg</span>
+        <span>${reversed[reversed.length-1].date.slice(5).replace('-','.')}</span>
+      </div>
+    </div>`;
+  }
+
+  return `
+  <div class="flex-1 overflow-y-auto pb-28 pt-safe">
+    <div class="px-5 pt-6 pb-2">
+      <h1 class="text-2xl font-black tracking-tight">Körpergewicht</h1>
+      <p class="text-slate-500 text-sm mt-0.5">Tracke deinen Gewichtsverlauf</p>
+    </div>
+
+    <!-- Eingabe -->
+    <div class="mx-4 mt-3 bg-slate-800/70 rounded-3xl p-5 border border-slate-700/30">
+      <p class="text-slate-400 text-sm font-medium mb-3">Heutiges Gewicht eintragen</p>
+      <div class="flex items-center gap-3">
+        <input id="weight-inp" type="number" inputmode="decimal" step="0.1" min="20" max="300"
+          value="${todayEntry ? todayEntry.kg : ''}"
+          placeholder="z.B. 75.5"
+          class="flex-1 bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-2xl px-4 py-3.5 text-white font-bold text-lg outline-none placeholder-slate-600"/>
+        <span class="text-slate-400 font-semibold shrink-0">kg</span>
+        <button id="btn-save-weight"
+          class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-5 py-3.5 rounded-2xl shadow-lg shadow-indigo-900/30 shrink-0">
+          Speichern
+        </button>
+      </div>
+      ${todayEntry ? `<p class="text-emerald-400 text-xs mt-2 font-medium">✓ Heute eingetragen: ${todayEntry.kg} kg</p>` : ''}
+    </div>
+
+    ${chartHtml}
+
+    <!-- History -->
+    <div class="mx-4 mt-3">
+      ${recent.length === 0
+        ? `<div class="text-center py-12">
+            <div class="text-4xl mb-2">⚖️</div>
+            <p class="text-slate-400 font-medium">Noch keine Einträge</p>
+            <p class="text-slate-600 text-xs mt-1">Trage dein Gewicht oben ein</p>
+           </div>`
+        : `<p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Einträge</p>
+           <div class="space-y-2 slide-in">
+             ${recent.map(e => {
+               const d = new Date(e.date + 'T12:00:00');
+               const label = d.toLocaleDateString('de-DE', { weekday:'short', day:'numeric', month:'short' });
+               return `
+               <div class="bg-slate-800/70 rounded-2xl px-4 py-3.5 flex items-center justify-between border border-slate-700/30">
+                 <div>
+                   <p class="font-semibold text-sm">${h(label)}</p>
+                   ${e.date === today ? '<p class="text-indigo-400 text-xs font-medium">Heute</p>' : ''}
+                 </div>
+                 <div class="flex items-center gap-3">
+                   <p class="font-black text-xl">${e.kg}<span class="text-slate-500 text-sm font-normal"> kg</span></p>
+                   <button data-del-weight="${h(e.date)}"
+                     class="btn-active text-slate-600 hover:text-red-400 p-1.5 rounded-xl hover:bg-red-400/10 transition-colors">
+                     ${iconTrash(16)}
+                   </button>
+                 </div>
+               </div>`;
+             }).join('')}
+           </div>`
+      }
+    </div>
+  </div>`;
+}
+
+// ─── FAVORITEN CARD (für idle-Suche) ────────────────────────
+function renderFavCard(food) {
+  const fav = true;
+  return `
+  <div class="bg-slate-800/70 rounded-2xl p-4 border border-rose-500/10">
+    <div class="flex items-center gap-3">
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm leading-snug">${h(food.name)}</p>
+        <div class="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5">
+          <span class="text-xs font-bold text-amber-400">${food.kcal100} kcal</span>
+          <span class="text-xs text-indigo-400">P ${food.protein100}g</span>
+          <span class="text-xs text-emerald-400">K ${food.carbs100}g</span>
+          <span class="text-xs text-orange-400">F ${food.fat100}g</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <button data-fav-remove="${h(food.name)}"
+          class="btn-active rounded-xl w-8 h-8 flex items-center justify-center bg-rose-500/20 border border-rose-500/30 text-rose-400">
+          ${iconHeart(14, true)}
+        </button>
+        <button data-fav-add-food="${h(food.name)}"
+          class="btn-active bg-indigo-600 hover:bg-indigo-500 rounded-xl w-8 h-8 flex items-center justify-center">
+          ${iconPlus(16)}
+        </button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ─── BOTTOM NAV ─────────────────────────────────────────────
+function renderBottomNav() {
+  const tabs = [
+    { id: 'dashboard', icon: iconHome,   label: 'Heute'   },
+    { id: 'search',    icon: iconSearch, label: 'Suchen'  },
+    { id: 'weight',    icon: iconScale,  label: 'Gewicht' },
+    { id: 'settings',  icon: iconGear,   label: 'Ziele'   },
+  ];
+  return `
+  <nav class="fixed bottom-0 inset-x-0 z-40 bg-slate-900/95 backdrop-blur-xl border-t border-slate-800">
+    <div class="max-w-md mx-auto flex pb-safe">
+      ${tabs.map(t => {
+        const active = S.view === t.id;
+        return `
+        <button data-nav="${t.id}"
+          class="btn-active flex-1 flex flex-col items-center justify-center pt-3 pb-2 gap-1 relative
+            ${active ? 'text-indigo-400' : 'text-slate-600 hover:text-slate-400'} transition-colors">
+          ${t.icon(active ? 22 : 22)}
+          <span class="text-xs font-semibold">${t.label}</span>
+          ${active ? '<div class="absolute top-0 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-indigo-400 rounded-full"></div>' : ''}
+        </button>`;
+      }).join('')}
+    </div>
+  </nav>`;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ICONS (SVG inline)
+// ═══════════════════════════════════════════════════════════
+const ico = (p, w=22) => `<svg width="${w}" height="${w}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+
+function iconPlus(w)        { return ico('<path stroke-width="2.5" d="M12 4v16m8-8H4"/>', w); }
+function iconTrash(w)       { return ico('<path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>', w); }
+function iconSearch(w)      { return ico('<path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>', w); }
+function iconHome(w)        { return ico('<path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>', w); }
+function iconGear(w)        { return ico('<path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/>', w); }
+function iconHeart(w, fill) {
+  const f = fill ? '#e11d48' : 'none';
+  const s = fill ? '#e11d48' : 'currentColor';
+  return `<svg width="${w}" height="${w}" fill="${f}" stroke="${s}" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>`;
+}
+function iconScale(w) { return ico('<path d="M3 6l9-4 9 4M3 6v12l9 4 9-4V6M12 2v20M3 12h18"/>', w); }
+
+// ═══════════════════════════════════════════════════════════
+//  EVENT BINDING
+// ═══════════════════════════════════════════════════════════
+function bind() {
+  // ── Bottom Nav ──
+  document.querySelectorAll('[data-nav]').forEach(b => {
+    b.addEventListener('click', () => {
+      S.view = b.dataset.nav;
+      if (S.view === 'settings') { S.settingsForm = { ...S.settings }; S.settingsMode = 'g'; }
+      render();
+    });
+  });
+
+  // ── Dashboard ──
+  const dashSearch = $('btn-dash-search');
+  if (dashSearch) dashSearch.addEventListener('click', () => { S.view = 'search'; render(); setTimeout(() => $('search-input')?.focus(), 60); });
+
+  const fabAdd = $('btn-add-fab');
+  if (fabAdd) fabAdd.addEventListener('click', openManualModal);
+
+  document.querySelectorAll('[data-del]').forEach(b => {
+    b.addEventListener('click', () => {
+      deleteMealFromLog(+b.dataset.del);
+      render();
+    });
+  });
+
+  // ── Search ──
+  const sinp = $('search-input');
+  if (sinp) {
+    sinp.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(sinp.value); });
+    sinp.addEventListener('input',   e => { S.searchQuery = e.target.value; });
+  }
+  const sbtn = $('btn-search');
+  if (sbtn) sbtn.addEventListener('click', () => {
+    const v = $('search-input')?.value || S.searchQuery;
+    doSearch(v);
+  });
+
+  document.querySelectorAll('[data-add-idx]').forEach(b => {
+    b.addEventListener('click', () => {
+      const idx = +b.dataset.addIdx;
+      S.selectedFoodIdx = idx;
+      S.selectedGrams = Math.max(S.searchResults[idx]?.serving || 100, 1);
+      S.showFoodModal = true;
+      render();
+    });
+  });
+
+  // ── Food Modal ──
+  const ginp = $('grams-inp');
+  if (ginp) {
+    ginp.addEventListener('input', e => {
+      const v = parseInt(e.target.value);
+      if (v > 0) { S.selectedGrams = v; updateFoodPreview(); }
+    });
+  }
+  const gdec = $('btn-g-dec');
+  if (gdec) gdec.addEventListener('click', () => {
+    S.selectedGrams = Math.max(1, S.selectedGrams - 10);
+    const inp = $('grams-inp'); if (inp) inp.value = S.selectedGrams;
+    updateFoodPreview();
+  });
+  const ginc = $('btn-g-inc');
+  if (ginc) ginc.addEventListener('click', () => {
+    S.selectedGrams += 10;
+    const inp = $('grams-inp'); if (inp) inp.value = S.selectedGrams;
+    updateFoodPreview();
+  });
+
+  const mcancel = $('btn-modal-cancel');
+  if (mcancel) mcancel.addEventListener('click', closeFoodModal);
+
+  const mbg = $('food-modal-bg');
+  if (mbg) mbg.addEventListener('click', e => { if (e.target === mbg) closeFoodModal(); });
+
+  const madd = $('btn-modal-add');
+  if (madd) madd.addEventListener('click', commitFoodAdd);
+
+  // ── Manual Modal ──
+  const mmancancel = $('btn-man-cancel');
+  if (mmancancel) mmancancel.addEventListener('click', closeManualModal);
+
+  const manbg = $('manual-modal-bg');
+  if (manbg) manbg.addEventListener('click', e => { if (e.target === manbg) closeManualModal(); });
+
+  const manadd = $('btn-man-add');
+  if (manadd) manadd.addEventListener('click', commitManualAdd);
+
+  // ── Settings Modus-Toggle (g / %) ──
+  $('sfm-g')?.addEventListener('click', () => { S.settingsMode = 'g'; render(); });
+  $('sfm-pct')?.addEventListener('click', () => { S.settingsMode = 'pct'; render(); });
+
+  // ── Settings Inputs ──
+  document.querySelectorAll('[data-sf]').forEach(inp => {
+    inp.addEventListener('input', e => {
+      const key = e.target.dataset.sf;
+      const calFactor = parseFloat(e.target.dataset.sfcal) || 0;
+      let v = parseFloat(e.target.value) || 0;
+      // Im %-Modus: Prozentwert → Gramm umrechnen (Kalorien bleibt immer als kcal)
+      if (S.settingsMode === 'pct' && calFactor > 0) {
+        v = Math.round(v / 100 * (S.settingsForm.kcal || 0) / calFactor);
+      }
+      S.settingsForm[key] = Math.max(0, v);
+      // Live-Preview der Gramm-Werte aktualisieren (ohne vollen Re-Render)
+      if (S.settingsMode === 'pct') render();
+    });
+  });
+
+  const savebtn = $('btn-save-settings');
+  if (savebtn) savebtn.addEventListener('click', () => {
+    S.settings = { ...S.settingsForm };
+    saveSettingsData(S.settings);
+    savebtn.textContent = '✓ Gespeichert!';
+    savebtn.classList.replace('bg-indigo-600','bg-emerald-600');
+    savebtn.classList.replace('hover:bg-indigo-500','hover:bg-emerald-500');
+    showToast('Ziele gespeichert!', '#059669');
+    setTimeout(render, 1500);
+  });
+
+  const resetbtn = $('btn-reset');
+  if (resetbtn) resetbtn.addEventListener('click', () => {
+    if (!confirm('Wirklich ALLE Daten löschen?\nDies kann nicht rückgängig gemacht werden.')) return;
+    localStorage.removeItem(KEYS.SETTINGS);
+    localStorage.removeItem(KEYS.LOG);
+    S.settings = { ...DEFAULT_SETTINGS };
+    S.settingsForm = { ...DEFAULT_SETTINGS };
+    S.view = 'dashboard';
+    showToast('Alle Daten gelöscht', '#dc2626');
+    render();
+  });
+
+  // ── Favoriten (Herz-Button in Suchergebnissen) ──
+  document.querySelectorAll('[data-fav-idx]').forEach(b => {
+    b.addEventListener('click', () => {
+      const food = S.searchResults[+b.dataset.favIdx];
+      if (food) { toggleFavorite(food); render(); setTimeout(() => { const inp = $('search-input'); if (inp) inp.value = S.searchQuery; }, 20); }
+    });
+  });
+  // Favorit entfernen aus der Favoriten-Sektion (idle)
+  document.querySelectorAll('[data-fav-remove]').forEach(b => {
+    b.addEventListener('click', () => {
+      const name = b.dataset.favRemove;
+      let favs = loadFavorites();
+      saveFavorites(favs.filter(f => f.name !== name));
+      showToast('Favorit entfernt', '#64748b');
+      render();
+    });
+  });
+  // Favorit direkt hinzufügen aus der Favoriten-Sektion (idle)
+  document.querySelectorAll('[data-fav-add-food]').forEach(b => {
+    b.addEventListener('click', () => {
+      const name = b.dataset.favAddFood;
+      const food = loadFavorites().find(f => f.name === name);
+      if (!food) return;
+      // Füge food zu searchResults hinzu und öffne Modal
+      if (!S.searchResults.find(f => f.name === food.name)) S.searchResults.unshift({ ...food, isFav: true });
+      const idx = S.searchResults.findIndex(f => f.name === food.name);
+      S.selectedFoodIdx = idx;
+      S.selectedGrams = Math.max(food.serving || 100, 1);
+      S.showFoodModal = true;
+      render();
+    });
+  });
+
+  // ── Gewicht ──
+  const saveWeightBtn = $('btn-save-weight');
+  if (saveWeightBtn) saveWeightBtn.addEventListener('click', () => {
+    const v = parseFloat($('weight-inp')?.value);
+    if (!v || isNaN(v) || v < 20 || v > 500) { showToast('Bitte gültiges Gewicht eingeben', '#dc2626'); return; }
+    addWeightEntry(+v.toFixed(1));
+    showToast(`${v.toFixed(1)} kg gespeichert ✓`, '#059669');
+    render();
+  });
+  document.querySelectorAll('[data-del-weight]').forEach(b => {
+    b.addEventListener('click', () => {
+      deleteWeightEntry(b.dataset.delWeight);
+      render();
+    });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ACTIONS
+// ═══════════════════════════════════════════════════════════
+function closeFoodModal() {
+  S.showFoodModal = false;
+  S.selectedFoodIdx = -1;
+  render();
+}
+
+function commitFoodAdd() {
+  const food = S.searchResults[S.selectedFoodIdx];
+  if (!food) return;
+  const g = Math.max(+($('grams-inp')?.value) || S.selectedGrams, 1);
+  const f = g / 100;
+  addMealToLog({
+    name:    food.name,
+    kcal:    num(food.kcal100    * f),
+    protein: num(food.protein100 * f, 1),
+    carbs:   num(food.carbs100   * f, 1),
+    fat:     num(food.fat100     * f, 1),
+    grams:   g,
+  });
+  S.showFoodModal = false;
+  S.selectedFoodIdx = -1;
+  S.view = 'dashboard';
+  showToast(`${food.name.substring(0,24)} hinzugefügt ✓`);
+  render();
+}
+
+function openManualModal() {
+  S.manualForm = { name:'', kcal:'', protein:'', carbs:'', fat:'', grams:'' };
+  S.showManualModal = true;
+  render();
+  setTimeout(() => $('mn-name')?.focus(), 50);
+}
+
+function closeManualModal() {
+  S.showManualModal = false;
+  render();
+}
+
+function commitManualAdd() {
+  const name = $('mn-name')?.value?.trim();
+  const kcal = parseFloat($('mn-kcal')?.value);
+  if (!name)       { showToast('Bitte einen Namen eingeben', '#dc2626'); return; }
+  if (!kcal || isNaN(kcal)) { showToast('Bitte Kalorien eingeben', '#dc2626'); return; }
+  const grams = parseFloat($('mn-grams')?.value) || null;
+  addMealToLog({
+    name,
+    kcal,
+    protein: parseFloat($('mn-protein')?.value) || 0,
+    carbs:   parseFloat($('mn-carbs')?.value)   || 0,
+    fat:     parseFloat($('mn-fat')?.value)     || 0,
+    grams,
+  });
+  S.showManualModal = false;
+  showToast(`${name.substring(0,24)} hinzugefügt ✓`);
+  render();
+}
+
+async function doSearch(query) {
+  query = (query || '').trim();
+  if (!query) return;
+  S.searchQuery = query;
+  S.searchError = '';
+
+  // Favoriten die zur Suchanfrage passen
+  const q = query.toLowerCase();
+  const favHits = loadFavorites()
+    .filter(f => f.name.toLowerCase().includes(q) || (f.tags||'').toLowerCase().includes(q))
+    .map(f => ({ ...f, isFav: true }));
+
+  // 1. Sofort: lokale Datenbank + Favoriten anzeigen
+  const localHits = searchLocalFoods(query);
+  const favNames = new Set(favHits.map(f => f.name.toLowerCase()));
+  const localOnly = localHits.filter(f => !favNames.has(f.name.toLowerCase()));
+  S.searchResults = [...favHits, ...localOnly];
+  S.searchState = 'done';
+  S.apiLoading = true;
+  render();
+  setTimeout(() => { const inp = $('search-input'); if (inp) inp.value = S.searchQuery; }, 20);
+
+  // 2. API im Hintergrund laden und Ergebnisse anfügen
+  try {
+    const apiResults = await searchFoods(query);
+    const allNames = new Set(S.searchResults.map(f => f.name.toLowerCase()));
+    const fresh = apiResults.filter(a => !allNames.has(a.name.toLowerCase()));
+    S.searchResults = [...favHits, ...localOnly, ...fresh];
+    if (S.searchResults.length === 0) showToast(`Keine Ergebnisse für „${query}"`, '#6b7280');
+  } catch (e) {
+    S.searchError = e.name === 'AbortError'
+      ? 'Online-Suche: Zeitüberschreitung.'
+      : 'Online-Suche nicht verfügbar (kein Internet).';
+  }
+  S.apiLoading = false;
+  render();
+  setTimeout(() => { const inp = $('search-input'); if (inp) inp.value = S.searchQuery; }, 20);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  INIT & SERVICE WORKER
+// ═══════════════════════════════════════════════════════════
+
+// Inline Service Worker for offline support (caches this HTML page & API calls)
+if ('serviceWorker' in navigator) {
+  const swCode = `
+    const V = 'kal-v2';
+    self.addEventListener('install', e => {
+      e.waitUntil(caches.open(V).then(c => c.addAll([location.pathname])).then(() => self.skipWaiting()));
+    });
+    self.addEventListener('activate', e => {
+      e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k=>k!==V).map(k=>caches.delete(k)))).then(()=>clients.claim()));
+    });
+    self.addEventListener('fetch', e => {
+      if (e.request.method !== 'GET') return;
+      const isAPI = e.request.url.includes('openfoodfacts.org');
+      e.respondWith(
+        caches.open(V).then(cache =>
+          cache.match(e.request).then(cached => {
+            const fresh = fetch(e.request).then(res => {
+              if (res.ok) cache.put(e.request, res.clone());
+              return res;
+            }).catch(() => cached);
+            return isAPI ? (cached || fresh) : (fresh.catch(()=>cached) || cached);
+          })
+        )
+      );
+    });
+  `;
+  const blob = new Blob([swCode], { type: 'application/javascript' });
+  navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(() => {});
+}
+
+// Boot
+render();
+</script>
+</body>
+</html>
