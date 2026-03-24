@@ -201,7 +201,7 @@ async function addEintragToSupabase(meal, localId) {
     }).select('id').single();
     if (data?.id) {
       const log = loadLog(); const d = getToday();
-      if (log[d]) { const e = log[d].find(x => x.id === localId); if (e) { e.sbId = data.id; saveLogData(log); } }
+      if (log[d]) { const e = log[d].find(x => x.id === localId); if (e) { e.sbId = data.id; e.lmId = lmId; saveLogData(log); } }
     }
   } catch(e) {}
 }
@@ -221,9 +221,10 @@ async function syncTodayFromSupabase() {
     const lmMap = Object.fromEntries((lmData||[]).map(l => [l.id, l]));
     const meals = eintraege.map(e => {
       const g = e.menge_gramm || 100; const f = g / 100; const l = lmMap[e.lebensmittel_id] || {};
-      return { id: e.id, sbId: e.id, name: l.name || '',
+      return { id: e.id, sbId: e.id, lmId: e.lebensmittel_id, name: l.name || '',
         kcal: Math.round((l.kalorien||0)*f), protein: +((l.protein||0)*f).toFixed(1),
-        carbs: +((l.kohlenhydrate||0)*f).toFixed(1), fat: +((l.fett||0)*f).toFixed(1), grams: g };
+        carbs: +((l.kohlenhydrate||0)*f).toFixed(1), fat: +((l.fett||0)*f).toFixed(1), grams: g,
+        kcal100: l.kalorien||0, protein100: l.protein||0, carbs100: l.kohlenhydrate||0, fat100: l.fett||0 };
     });
     const log = loadLog(); log[today] = meals; saveLogData(log); render();
   } catch(e) {}
@@ -259,17 +260,17 @@ function getTotals(meals) {
 async function calcAllNutrients(meals) {
   const result = Object.fromEntries(NUTRIENT_KEYS.map(k => [k, 0]));
   const sb = getSB();
-  const sbIds = meals.filter(m => m.sbId).map(m => m.sbId);
+  const lmIds = meals.filter(m => m.lmId).map(m => m.lmId);
   let lmExtended = {};
-  if (sb && sbIds.length > 0) {
+  if (sb && lmIds.length > 0) {
     const { data } = await sb.from('lebensmittel')
       .select('id,' + NUTRIENT_KEYS.join(','))
-      .in('id', sbIds);
+      .in('id', lmIds);
     if (data) lmExtended = Object.fromEntries(data.map(r => [r.id, r]));
   }
   for (const meal of meals) {
     const factor = (meal.grams || 100) / 100;
-    const ext = lmExtended[meal.sbId] || {};
+    const ext = lmExtended[meal.lmId] || {};
     result.kalorien      += (ext.kalorien      ?? meal.kcal100    ?? 0) * factor;
     result.protein       += (ext.protein       ?? meal.protein100 ?? 0) * factor;
     result.fett          += (ext.fett          ?? meal.fat100     ?? 0) * factor;
@@ -314,7 +315,7 @@ async function loadDayData(date) {
         const lmMap = Object.fromEntries((lmData||[]).map(l => [l.id, l]));
         meals = eintraege.map(e => {
           const g = e.menge_gramm || 100; const f = g / 100; const l = lmMap[e.lebensmittel_id] || {};
-          return { id: e.id, sbId: e.id, name: l.name || '', grams: g,
+          return { id: e.id, sbId: e.id, lmId: e.lebensmittel_id, name: l.name || '', grams: g,
             kcal: Math.round((l.kalorien||0)*f), protein: +((l.protein||0)*f).toFixed(1),
             carbs: +((l.kohlenhydrate||0)*f).toFixed(1), fat: +((l.fett||0)*f).toFixed(1),
             kcal100: l.kalorien||0, protein100: l.protein||0, carbs100: l.kohlenhydrate||0, fat100: l.fett||0 };
@@ -354,7 +355,7 @@ async function loadWeekData(date) {
         for (const e of data) {
           if (!eintraegeByDate[e.datum]) eintraegeByDate[e.datum] = [];
           const g = e.menge_gramm||100; const f=g/100; const l=lmMap[e.lebensmittel_id]||{};
-          eintraegeByDate[e.datum].push({ id:e.id, sbId:e.id, name:l.name||'', grams:g,
+          eintraegeByDate[e.datum].push({ id:e.id, sbId:e.id, lmId:e.lebensmittel_id, name:l.name||'', grams:g,
             kcal:Math.round((l.kalorien||0)*f), protein:+((l.protein||0)*f).toFixed(1),
             carbs:+((l.kohlenhydrate||0)*f).toFixed(1), fat:+((l.fett||0)*f).toFixed(1),
             kcal100:l.kalorien||0, protein100:l.protein||0, carbs100:l.kohlenhydrate||0, fat100:l.fett||0 });
@@ -769,6 +770,22 @@ function renderDashboard() {
         }
       </div>` : ''}
     </div>
+
+    <!-- Weight Entry -->
+    ${(() => {
+      const todayWeight = loadWeightLog().find(e => e.date === getToday());
+      return `
+    <div class="mx-4 mt-3 bg-slate-800/70 rounded-2xl p-3.5 border border-slate-700/30 flex items-center gap-3">
+      ${iconScale(18)}
+      <input id="dash-weight-inp" type="number" inputmode="decimal" step="0.1" min="20" max="300"
+        value="${todayWeight ? todayWeight.kg : ''}" placeholder="Gewicht heute (kg)"
+        class="flex-1 bg-transparent border-none outline-none text-white text-sm placeholder-slate-600 font-medium"/>
+      <button id="dash-save-weight"
+        class="btn-active bg-slate-700 hover:bg-slate-600 text-slate-300 font-semibold px-3 py-1.5 rounded-xl text-xs shrink-0 transition-colors">
+        ${todayWeight ? '✓ ' + todayWeight.kg + ' kg' : 'Speichern'}
+      </button>
+    </div>`;
+    })()}
 
     <!-- Meals Section -->
     <div class="mx-4 mt-4">
@@ -1614,6 +1631,17 @@ function bind() {
   });
 
   // ── Dashboard ──
+  qs('#dash-save-weight')?.addEventListener('click', () => {
+    const v = parseFloat(qs('#dash-weight-inp')?.value);
+    if (!v || isNaN(v) || v < 20 || v > 500) { showToast('Bitte gültiges Gewicht eingeben', '#dc2626'); return; }
+    addWeightEntry(+v.toFixed(1));
+    showToast(`${v.toFixed(1)} kg gespeichert ✓`, '#059669');
+    render();
+  });
+  qs('#dash-weight-inp')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') qs('#dash-save-weight')?.click();
+  });
+
   const dashSearch = $('btn-dash-search');
   if (dashSearch) dashSearch.addEventListener('click', () => { S.view = 'search'; render(); setTimeout(() => $('search-input')?.focus(), 60); });
 
