@@ -194,7 +194,7 @@ async function findOrCreateLebensmittel(meal) {
 async function addEintragToSupabase(meal, localId) {
   const sb = getSB(); if (!sb) return;
   try {
-    const lmId = await findOrCreateLebensmittel(meal);
+    const lmId = meal.lmId || await findOrCreateLebensmittel(meal);
     if (!lmId) return;
     const { data } = await sb.from('eintraege').insert({
       datum: getToday(), lebensmittel_id: lmId, menge_gramm: meal.grams || 100, notiz: '',
@@ -674,6 +674,11 @@ function renderDashboard() {
   const ringColor = calPct > 1 ? '#ef4444' : calPct > 0.85 ? '#f59e0b' : '#818cf8';
   const dateStr = new Date().toLocaleDateString('de-DE', { weekday:'long', day:'numeric', month:'long' });
   const todayWeight = loadWeightLog().find(e => e.date === getToday());
+
+  // Auto-reload extended nutrients when widget is expanded but data was invalidated
+  if (S.dashExpanded && S.dashNutrients === null) {
+    setTimeout(() => calcAllNutrients(getTodayMeals()).then(n => { S.dashNutrients = n; render(); }), 0);
+  }
 
   return `
   <div class="flex-1 overflow-y-auto pb-28 pt-safe">
@@ -2018,6 +2023,7 @@ function commitFoodAdd() {
     grams:      g,
     kcal100:    food.kcal100,
     protein100: food.protein100,
+    lmId:       food.sbId || null,   // pass lebensmittel ID immediately — no async wait
     carbs100:   food.carbs100,
     fat100:     food.fat100,
   });
