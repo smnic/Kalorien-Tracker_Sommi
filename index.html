@@ -74,11 +74,22 @@ function loadFavorites() {
 }
 function saveFavorites(favs) { localStorage.setItem(KEYS.FAVORITES, JSON.stringify(favs)); }
 function isFavorite(name) { return loadFavorites().some(f => f.name === name); }
-function toggleFavorite(food) {
+async function toggleFavorite(food) {
+  const sb = getSB();
   let favs = loadFavorites();
   const idx = favs.findIndex(f => f.name === food.name);
-  if (idx >= 0) { favs.splice(idx, 1); showToast('Favorit entfernt', '#64748b'); }
-  else { favs.unshift({ ...food, isFav: true }); showToast('❤️ Als Favorit gespeichert', '#e11d48'); }
+  if (idx >= 0) {
+    favs.splice(idx, 1);
+    showToast('Favorit entfernt', '#64748b');
+    if (sb) await sb.from('favoriten').delete().eq('name', food.name);
+  } else {
+    favs.unshift({ ...food, isFav: true });
+    showToast('❤️ Als Favorit gespeichert', '#e11d48');
+    if (sb) await sb.from('favoriten').upsert({
+      name: food.name, kcal100: food.kcal100||0, protein100: food.protein100||0,
+      carbs100: food.carbs100||0, fat100: food.fat100||0, lebensmittel_id: food.sbId||null
+    }, { onConflict: 'name' });
+  }
   saveFavorites(favs);
 }
 
@@ -244,10 +255,31 @@ async function syncWeightFromSupabase() {
   } catch(e) {}
 }
 
+async function syncSettingsFromSupabase() {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const { data } = await sb.from('profil').select('kcal_ziel,protein_ziel,carbs_ziel,fat_ziel').eq('id', 1).single();
+    if (data) {
+      const s = { kcal: data.kcal_ziel, protein: data.protein_ziel, carbs: data.carbs_ziel, fat: data.fat_ziel };
+      saveSettingsData(s); S.settings = s; S.settingsForm = { ...s };
+    }
+  } catch(e) {}
+}
+
+async function syncFavoritesFromSupabase() {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const { data } = await sb.from('favoriten').select('name,kcal100,protein100,carbs100,fat100,lebensmittel_id');
+    if (data && data.length > 0) {
+      saveFavorites(data.map(f => ({ name: f.name, kcal100: f.kcal100, protein100: f.protein100, carbs100: f.carbs100, fat100: f.fat100, sbId: f.lebensmittel_id, isFav: true })));
+    }
+  } catch(e) {}
+}
+
 async function initSupabase() {
   try {
     getSB();
-    await Promise.all([syncLebensmittelCache(), syncTodayFromSupabase(), syncWeightFromSupabase()]);
+    await Promise.all([syncLebensmittelCache(), syncTodayFromSupabase(), syncWeightFromSupabase(), syncSettingsFromSupabase(), syncFavoritesFromSupabase()]);
   } catch(e) { console.warn('Supabase init failed:', e); }
 }
 
@@ -1864,9 +1896,14 @@ function bind() {
   });
 
   const savebtn = $('btn-save-settings');
-  if (savebtn) savebtn.addEventListener('click', () => {
+  if (savebtn) savebtn.addEventListener('click', async () => {
     S.settings = { ...S.settingsForm };
     saveSettingsData(S.settings);
+    const sb = getSB();
+    if (sb) await sb.from('profil').upsert({
+      id: 1, kcal_ziel: S.settings.kcal, protein_ziel: S.settings.protein,
+      carbs_ziel: S.settings.carbs, fat_ziel: S.settings.fat
+    }, { onConflict: 'id' });
     savebtn.textContent = '✓ Gespeichert!';
     savebtn.classList.replace('bg-indigo-600','bg-emerald-600');
     savebtn.classList.replace('hover:bg-indigo-500','hover:bg-emerald-500');
@@ -1895,10 +1932,10 @@ function bind() {
   });
   // Favorit entfernen aus der Favoriten-Sektion (idle)
   document.querySelectorAll('[data-fav-remove]').forEach(b => {
-    b.addEventListener('click', () => {
+    b.addEventListener('click', async () => {
       const name = b.dataset.favRemove;
-      let favs = loadFavorites();
-      saveFavorites(favs.filter(f => f.name !== name));
+      saveFavorites(loadFavorites().filter(f => f.name !== name));
+      const sb = getSB(); if (sb) await sb.from('favoriten').delete().eq('name', name);
       showToast('Favorit entfernt', '#64748b');
       render();
     });
