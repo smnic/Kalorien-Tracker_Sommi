@@ -33,6 +33,8 @@
     .macro-fill { transition: width 0.6s cubic-bezier(0.4,0,0.2,1); }
     .btn-active { transition: transform 0.1s, opacity 0.1s; }
     .btn-active:active { transform: scale(0.95); opacity: 0.85; }
+  .chevron-rot { transform: rotate(180deg); }
+  .chevron-anim { transition: transform 0.3s ease; }
   </style>
 </head>
 
@@ -48,6 +50,11 @@
 const KEYS = { SETTINGS: 'kal_settings', LOG: 'kal_log', FAVORITES: 'kal_favs', WEIGHT: 'kal_weight', LEBENSMITTEL: 'kal_lm' };
 
 const DEFAULT_SETTINGS = { kcal: 2000, protein: 150, carbs: 220, fat: 65 };
+
+const NUTRIENT_KEYS = ['kalorien','kalorien_kj','protein','fett','kohlenhydrate','zucker','salz','ballaststoffe','wasser','natrium','kalium','calcium','magnesium','eisen','zink','vitamin_c','cholesterin'];
+const NUTRIENT_LABELS = { kalorien:'Kalorien', kalorien_kj:'Energie (kJ)', protein:'Protein', fett:'Fett', kohlenhydrate:'Kohlenhydrate', zucker:'Zucker', salz:'Salz', ballaststoffe:'Ballaststoffe', wasser:'Wasser', natrium:'Natrium', kalium:'Kalium', calcium:'Calcium', magnesium:'Magnesium', eisen:'Eisen', zink:'Zink', vitamin_c:'Vitamin C', cholesterin:'Cholesterin' };
+const NUTRIENT_UNITS = { kalorien:'kcal', kalorien_kj:'kJ', protein:'g', fett:'g', kohlenhydrate:'g', zucker:'g', salz:'g', ballaststoffe:'g', wasser:'g', natrium:'mg', kalium:'mg', calcium:'mg', magnesium:'mg', eisen:'mg', zink:'mg', vitamin_c:'mg', cholesterin:'mg' };
+const NUTRIENT_EXT_KEYS = ['kalorien_kj','zucker','salz','ballaststoffe','wasser','natrium','kalium','calcium','magnesium','eisen','zink','vitamin_c','cholesterin'];
 
 function loadSettings() {
   try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(KEYS.SETTINGS) || '{}') }; }
@@ -106,6 +113,7 @@ function addMealToLog(meal) {
   const localId = Date.now() + Math.random();
   log[d].unshift({ id: localId, sbId: null, ...meal });
   saveLogData(log);
+  S.dashNutrients = null; // invalidate cached extended nutrients
   addEintragToSupabase(meal, localId).catch(() => {});
 }
 
@@ -117,6 +125,7 @@ function deleteMealFromLog(id) {
     if (entry?.sbId) getSB()?.from('eintraege').delete().eq('id', entry.sbId).catch(() => {});
     log[d] = log[d].filter(m => m.id !== id);
     saveLogData(log);
+    S.dashNutrients = null; // invalidate cached extended nutrients
   }
 }
 
@@ -247,6 +256,125 @@ function getTotals(meals) {
   }), { kcal: 0, protein: 0, carbs: 0, fat: 0 });
 }
 
+async function calcAllNutrients(meals) {
+  const result = Object.fromEntries(NUTRIENT_KEYS.map(k => [k, 0]));
+  const sb = getSB();
+  const sbIds = meals.filter(m => m.sbId).map(m => m.sbId);
+  let lmExtended = {};
+  if (sb && sbIds.length > 0) {
+    const { data } = await sb.from('lebensmittel')
+      .select('id,' + NUTRIENT_KEYS.join(','))
+      .in('id', sbIds);
+    if (data) lmExtended = Object.fromEntries(data.map(r => [r.id, r]));
+  }
+  for (const meal of meals) {
+    const factor = (meal.grams || 100) / 100;
+    const ext = lmExtended[meal.sbId] || {};
+    result.kalorien      += (ext.kalorien      ?? meal.kcal100    ?? 0) * factor;
+    result.protein       += (ext.protein       ?? meal.protein100 ?? 0) * factor;
+    result.fett          += (ext.fett          ?? meal.fat100     ?? 0) * factor;
+    result.kohlenhydrate += (ext.kohlenhydrate ?? meal.carbs100   ?? 0) * factor;
+    for (const k of NUTRIENT_EXT_KEYS) {
+      if (ext[k] != null) result[k] += ext[k] * factor;
+    }
+  }
+  for (const k of NUTRIENT_KEYS) result[k] = +result[k].toFixed(1);
+  return result;
+}
+
+function getWeekDates(refDate) {
+  const d = new Date(refDate + 'T12:00:00');
+  const day = d.getDay();
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - ((day + 6) % 7));
+  return Array.from({length: 7}, (_, i) => {
+    const dd = new Date(monday);
+    dd.setDate(monday.getDate() + i);
+    return dd.toISOString().slice(0, 10);
+  });
+}
+
+async function loadDayData(date) {
+  S.historyDate = date;
+  S.historyLoading = true;
+  S.historyData = null;
+  render();
+  try {
+    const log = loadLog();
+    let meals = log[date] ? [...log[date]] : [];
+    const sb = getSB();
+    if (sb) {
+      const { data: eintraege } = await sb.from('eintraege')
+        .select('id, menge_gramm, lebensmittel_id')
+        .eq('datum', date).order('id', { ascending: false });
+      if (eintraege && eintraege.length > 0) {
+        const lmIds = [...new Set(eintraege.map(e => e.lebensmittel_id))];
+        const { data: lmData } = await sb.from('lebensmittel')
+          .select('id, name, kalorien, protein, fett, kohlenhydrate').in('id', lmIds);
+        const lmMap = Object.fromEntries((lmData||[]).map(l => [l.id, l]));
+        meals = eintraege.map(e => {
+          const g = e.menge_gramm || 100; const f = g / 100; const l = lmMap[e.lebensmittel_id] || {};
+          return { id: e.id, sbId: e.id, name: l.name || '', grams: g,
+            kcal: Math.round((l.kalorien||0)*f), protein: +((l.protein||0)*f).toFixed(1),
+            carbs: +((l.kohlenhydrate||0)*f).toFixed(1), fat: +((l.fett||0)*f).toFixed(1),
+            kcal100: l.kalorien||0, protein100: l.protein||0, carbs100: l.kohlenhydrate||0, fat100: l.fett||0 };
+        });
+      }
+    }
+    S.historyData = { meals, nutrients: await calcAllNutrients(meals) };
+  } catch(e) {
+    S.historyData = { meals: [], nutrients: Object.fromEntries(NUTRIENT_KEYS.map(k => [k, 0])) };
+  }
+  S.historyLoading = false;
+  render();
+}
+
+async function loadWeekData(date) {
+  S.historyDate = date;
+  S.historyLoading = true;
+  S.historyWeekData = null;
+  render();
+  try {
+    const dates = getWeekDates(date);
+    const log = loadLog();
+    const sb = getSB();
+    let eintraegeByDate = {};
+    if (sb) {
+      const { data } = await sb.from('eintraege')
+        .select('id, menge_gramm, lebensmittel_id, datum')
+        .gte('datum', dates[0]).lte('datum', dates[6]);
+      if (data && data.length > 0) {
+        const lmIds = [...new Set(data.map(e => e.lebensmittel_id))];
+        let lmMap = {};
+        if (lmIds.length > 0) {
+          const { data: lmData } = await sb.from('lebensmittel')
+            .select('id, name, kalorien, protein, fett, kohlenhydrate').in('id', lmIds);
+          lmMap = Object.fromEntries((lmData||[]).map(l => [l.id, l]));
+        }
+        for (const e of data) {
+          if (!eintraegeByDate[e.datum]) eintraegeByDate[e.datum] = [];
+          const g = e.menge_gramm||100; const f=g/100; const l=lmMap[e.lebensmittel_id]||{};
+          eintraegeByDate[e.datum].push({ id:e.id, sbId:e.id, name:l.name||'', grams:g,
+            kcal:Math.round((l.kalorien||0)*f), protein:+((l.protein||0)*f).toFixed(1),
+            carbs:+((l.kohlenhydrate||0)*f).toFixed(1), fat:+((l.fett||0)*f).toFixed(1),
+            kcal100:l.kalorien||0, protein100:l.protein||0, carbs100:l.kohlenhydrate||0, fat100:l.fett||0 });
+        }
+      }
+    }
+    const weightLog = loadWeightLog();
+    S.historyWeekData = dates.map(d => {
+      const meals = eintraegeByDate[d] || log[d] || [];
+      const totals = getTotals(meals);
+      const w = weightLog.find(e => e.date === d);
+      return { date: d, meals, totals, weight: w?.kg ?? null };
+    });
+  } catch(e) {
+    S.historyWeekData = getWeekDates(date).map(d => ({ date: d, meals: [], totals: { kcal:0, protein:0, carbs:0, fat:0 }, weight: null }));
+  }
+  S.historyLoading = false;
+  render();
+}
+
 // ═══════════════════════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════════════════════
@@ -265,6 +393,13 @@ const S = {
   manualForm: { name: '', kcal: '', protein: '', carbs: '', fat: '', grams: '' },
   apiLoading: false,
   settingsMode: 'g', // 'g' | 'pct'
+  historyMode: 'day',
+  historyDate: getToday(),
+  historyData: null,
+  historyWeekData: null,
+  historyLoading: false,
+  dashExpanded: false,
+  dashNutrients: null,
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -487,6 +622,7 @@ function num(n, dec = 0) { return dec ? +(+n).toFixed(dec) : Math.round(+n); }
 function pct(v, max) { return Math.min(v / Math.max(max, 1), 1); }
 
 function $(id) { return document.getElementById(id); }
+function qs(s)  { return document.querySelector(s); }
 
 // ═══════════════════════════════════════════════════════════
 //  RENDER ENGINE
@@ -507,6 +643,16 @@ function renderView() {
   if (S.view === 'search')    return renderSearch();
   if (S.view === 'settings')  return renderSettings();
   if (S.view === 'weight')    return renderWeightView();
+  if (S.view === 'history') {
+    if (S.historyMode === 'day' && !S.historyData && !S.historyLoading) {
+      S.historyLoading = true;
+      setTimeout(() => loadDayData(S.historyDate), 0);
+    } else if (S.historyMode === 'week' && !S.historyWeekData && !S.historyLoading) {
+      S.historyLoading = true;
+      setTimeout(() => loadWeekData(S.historyDate), 0);
+    }
+    return renderHistory();
+  }
   return '';
 }
 
@@ -594,8 +740,38 @@ function renderDashboard() {
       ${macroCard('Fett',     num(totals.fat,1),    sg.fat,     '#fb923c', 'g')}
     </div>
 
+    <!-- Extended Nutrients Expandable -->
+    <div class="mx-4 mt-3">
+      <button id="dash-expand-btn"
+        class="btn-active w-full bg-slate-800/70 border border-slate-700/30 rounded-2xl px-4 py-3 flex items-center justify-between transition-colors hover:border-slate-600/50">
+        <span class="text-sm font-semibold text-slate-400">Erweiterte Nährwerte</span>
+        <svg class="chevron-anim ${S.dashExpanded ? 'chevron-rot' : ''}" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7"/></svg>
+      </button>
+      ${S.dashExpanded ? `
+      <div class="mt-1.5 bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30 slide-in">
+        ${S.dashNutrients === null
+          ? `<div class="flex items-center justify-center gap-2 py-2">
+              <div class="w-4 h-4 rounded-full border border-indigo-500 border-t-transparent spin"></div>
+              <span class="text-slate-500 text-xs">Lade erweiterte Nährwerte…</span>
+             </div>`
+          : (() => {
+              const visible = NUTRIENT_EXT_KEYS.filter(k => S.dashNutrients[k] > 0);
+              return visible.length === 0
+                ? `<p class="text-slate-600 text-xs text-center py-2">Keine erweiterten Daten – füge BLS-Lebensmittel hinzu.</p>`
+                : `<div class="grid grid-cols-2 gap-x-4 gap-y-2">
+                    ${visible.map(k => `
+                      <div class="flex justify-between items-center">
+                        <span class="text-slate-500 text-xs">${NUTRIENT_LABELS[k]}</span>
+                        <span class="font-semibold text-slate-300 text-xs">${num(S.dashNutrients[k],1)} ${NUTRIENT_UNITS[k]}</span>
+                      </div>`).join('')}
+                   </div>`;
+            })()
+        }
+      </div>` : ''}
+    </div>
+
     <!-- Meals Section -->
-    <div class="mx-4 mt-5">
+    <div class="mx-4 mt-4">
       <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Heutige Mahlzeiten</p>
       ${meals.length === 0
         ? `<div class="bg-slate-800/50 rounded-2xl p-8 text-center border border-slate-700/30">
@@ -1123,6 +1299,234 @@ function renderWeightView() {
   </div>`;
 }
 
+// ─── HISTORY VIEW ───────────────────────────────────────────
+function renderHistory() {
+  const today = getToday();
+  let navLabel;
+  if (S.historyMode === 'day') {
+    const d = new Date(S.historyDate + 'T12:00:00');
+    navLabel = S.historyDate === today
+      ? 'Heute'
+      : d.toLocaleDateString('de-DE', { weekday:'short', day:'numeric', month:'short' });
+  } else {
+    const dates = getWeekDates(S.historyDate);
+    const from = new Date(dates[0]+'T12:00:00');
+    const to   = new Date(dates[6]+'T12:00:00');
+    navLabel = from.toLocaleDateString('de-DE',{day:'numeric',month:'short'}) + ' – ' + to.toLocaleDateString('de-DE',{day:'numeric',month:'short'});
+  }
+  const isNextDisabled = S.historyMode === 'day' ? S.historyDate >= today : getWeekDates(S.historyDate)[0] >= today;
+  const content = S.historyLoading
+    ? `<div class="flex flex-col items-center justify-center py-20 gap-4">
+        <div class="w-10 h-10 rounded-full border-2 border-indigo-500 border-t-transparent spin"></div>
+        <p class="text-slate-400 text-sm">Lade Daten…</p>
+       </div>`
+    : (S.historyMode === 'day' ? renderHistoryDay() : renderHistoryWeek());
+
+  return `
+  <div class="flex-1 overflow-y-auto pb-28 pt-safe">
+    <div class="px-5 pt-6 pb-2">
+      <h1 class="text-2xl font-black tracking-tight">Verlauf</h1>
+    </div>
+
+    <!-- Mode toggle + nav -->
+    <div class="px-4 flex items-center gap-2 mb-3">
+      <div class="flex bg-slate-800 rounded-2xl p-1 gap-0.5">
+        <button id="hist-day-btn"
+          class="btn-active px-4 py-1.5 rounded-xl text-sm font-bold transition-colors
+            ${S.historyMode==='day' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}">
+          Tag
+        </button>
+        <button id="hist-week-btn"
+          class="btn-active px-4 py-1.5 rounded-xl text-sm font-bold transition-colors
+            ${S.historyMode==='week' ? 'bg-indigo-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}">
+          Woche
+        </button>
+      </div>
+      <div class="flex-1 flex items-center justify-end gap-1.5">
+        <button id="hist-prev"
+          class="btn-active bg-slate-800 rounded-xl w-9 h-9 flex items-center justify-center text-slate-400 hover:text-white transition-colors">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <span class="text-sm font-semibold text-slate-300 min-w-[110px] text-center">${h(navLabel)}</span>
+        <button id="hist-next"
+          class="btn-active bg-slate-800 rounded-xl w-9 h-9 flex items-center justify-center text-slate-400 hover:text-white transition-colors ${isNextDisabled ? 'opacity-30 pointer-events-none' : ''}">
+          <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+    </div>
+
+    ${content}
+  </div>`;
+}
+
+function renderHistoryDay() {
+  if (!S.historyData) {
+    return `<div class="text-center py-16 text-slate-500 text-sm">Keine Daten.</div>`;
+  }
+  const { meals, nutrients } = S.historyData;
+  const sg = S.settings;
+  const weightLog = loadWeightLog();
+  const dayWeight = weightLog.find(e => e.date === S.historyDate);
+  const hasExtended = NUTRIENT_EXT_KEYS.some(k => nutrients[k] > 0);
+
+  const mealList = meals.length === 0
+    ? `<div class="bg-slate-800/50 rounded-2xl p-6 text-center border border-slate-700/30">
+        <p class="text-slate-500 text-sm">Keine Mahlzeiten für diesen Tag</p>
+       </div>`
+    : `<div class="space-y-2">${meals.map(m => `
+        <div class="bg-slate-800/70 rounded-2xl px-4 py-3 flex items-center gap-3 border border-slate-700/30">
+          <div class="flex-1 min-w-0">
+            <p class="font-semibold text-sm leading-snug truncate">${h(m.name)}</p>
+            <p class="text-slate-500 text-xs">${m.grams ? m.grams+'g · ' : ''}${num(m.kcal)} kcal</p>
+          </div>
+          <div class="flex gap-2 text-xs shrink-0">
+            <span class="text-indigo-400">P ${num(m.protein,1)}g</span>
+            <span class="text-emerald-400">K ${num(m.carbs,1)}g</span>
+            <span class="text-orange-400">F ${num(m.fat,1)}g</span>
+          </div>
+        </div>`).join('')}</div>`;
+
+  return `
+  <!-- Weight Entry -->
+  <div class="mx-4 mb-3 bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30">
+    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Gewicht</p>
+    <div class="flex items-center gap-2">
+      <input id="hist-weight-inp" type="number" inputmode="decimal" step="0.1" min="20" max="300"
+        value="${dayWeight ? dayWeight.kg : ''}" placeholder="z.B. 75.5"
+        class="flex-1 bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-3 py-2.5 text-white font-bold text-sm outline-none placeholder-slate-600"/>
+      <span class="text-slate-400 text-sm shrink-0">kg</span>
+      <button id="hist-save-weight"
+        class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm shrink-0">
+        ${dayWeight ? 'Update' : 'Speichern'}
+      </button>
+    </div>
+    ${dayWeight ? `<p class="text-emerald-400 text-xs mt-1.5 font-medium">✓ Eingetragen: ${dayWeight.kg} kg</p>` : ''}
+  </div>
+
+  <!-- Macro Summary -->
+  <div class="mx-4 mb-3 bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30">
+    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Nährwerte gesamt</p>
+    <div class="grid grid-cols-2 gap-2">
+      <div class="bg-slate-700/50 rounded-xl p-3">
+        <p class="text-amber-400 font-black text-xl">${num(nutrients.kalorien)}</p>
+        <p class="text-slate-500 text-xs">kcal / ${sg.kcal} Ziel</p>
+      </div>
+      <div class="bg-slate-700/50 rounded-xl p-3">
+        <p class="text-slate-300 font-bold text-base">${num(nutrients.kalorien_kj)}</p>
+        <p class="text-slate-500 text-xs">kJ Energie</p>
+      </div>
+      <div class="bg-slate-700/50 rounded-xl p-3">
+        <p class="text-indigo-400 font-black text-xl">${num(nutrients.protein,1)}g</p>
+        <p class="text-slate-500 text-xs">Protein / ${sg.protein}g</p>
+      </div>
+      <div class="bg-slate-700/50 rounded-xl p-3">
+        <p class="text-emerald-400 font-black text-xl">${num(nutrients.kohlenhydrate,1)}g</p>
+        <p class="text-slate-500 text-xs">KH / ${sg.carbs}g Ziel</p>
+      </div>
+      <div class="bg-slate-700/50 rounded-xl p-3">
+        <p class="text-orange-400 font-black text-xl">${num(nutrients.fett,1)}g</p>
+        <p class="text-slate-500 text-xs">Fett / ${sg.fat}g Ziel</p>
+      </div>
+      ${nutrients.ballaststoffe > 0 ? `<div class="bg-slate-700/50 rounded-xl p-3">
+        <p class="text-teal-400 font-black text-xl">${num(nutrients.ballaststoffe,1)}g</p>
+        <p class="text-slate-500 text-xs">Ballaststoffe</p>
+      </div>` : ''}
+    </div>
+    ${hasExtended ? `
+    <div class="mt-3 border-t border-slate-700/50 pt-3">
+      <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-2.5">Weitere Nährwerte (BLS)</p>
+      <div class="grid grid-cols-2 gap-x-4 gap-y-2">
+        ${NUTRIENT_EXT_KEYS.filter(k => !['kalorien_kj','ballaststoffe'].includes(k) && nutrients[k] > 0).map(k => `
+          <div class="flex justify-between items-center">
+            <span class="text-slate-500 text-xs">${NUTRIENT_LABELS[k]}</span>
+            <span class="font-semibold text-slate-300 text-xs">${num(nutrients[k],1)} ${NUTRIENT_UNITS[k]}</span>
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+  </div>
+
+  <!-- Meals -->
+  <div class="mx-4 mb-4">
+    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Mahlzeiten (${meals.length})</p>
+    ${mealList}
+  </div>`;
+}
+
+function renderHistoryWeek() {
+  if (!S.historyWeekData) return `<div class="text-center py-12 text-slate-500 text-sm">Lade Wochendaten…</div>`;
+  const data = S.historyWeekData;
+  const sg = S.settings;
+  const today = getToday();
+  const DAY_NAMES = ['Mo','Di','Mi','Do','Fr','Sa','So'];
+
+  // SVG bar chart
+  const W = 300, H = 110, BAR_W = 28, GAP = (W - 7*BAR_W) / 8;
+  const maxKcal = Math.max(...data.map(d => d.totals.kcal), sg.kcal, 1);
+  const goalLineY = H - (sg.kcal / maxKcal) * H;
+
+  const bars = data.map((d, i) => {
+    const barH = (d.totals.kcal / maxKcal) * H;
+    const x = GAP + i * (BAR_W + GAP);
+    const y = H - barH;
+    const isToday = d.date === today;
+    const over = d.totals.kcal > sg.kcal;
+    const color = d.totals.kcal === 0 ? '#1e293b' : over ? '#ef4444' : isToday ? '#818cf8' : '#334155';
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${BAR_W}" height="${Math.max(barH,2).toFixed(1)}" rx="4" fill="${color}"/>
+      <text x="${(x+BAR_W/2).toFixed(1)}" y="${(H+14).toFixed(1)}" text-anchor="middle" fill="${isToday?'#818cf8':'#64748b'}" font-size="10" font-family="-apple-system,sans-serif" font-weight="${isToday?'700':'400'}">${DAY_NAMES[i]}</text>
+      ${d.totals.kcal > 0 ? `<text x="${(x+BAR_W/2).toFixed(1)}" y="${(y-4).toFixed(1)}" text-anchor="middle" fill="${over?'#f87171':'#94a3b8'}" font-size="8" font-family="-apple-system,sans-serif">${num(d.totals.kcal)}</text>` : ''}`;
+  }).join('');
+
+  const totalKcal = data.reduce((a, d) => a + d.totals.kcal, 0);
+  const daysWithData = data.filter(d => d.totals.kcal > 0).length;
+  const avgKcal = daysWithData ? Math.round(totalKcal / daysWithData) : 0;
+
+  return `
+  <!-- Week Chart -->
+  <div class="mx-4 mb-3 bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30">
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-widest">Wochenübersicht</p>
+      <span class="text-xs text-slate-400 font-semibold">Ø ${avgKcal || '–'} kcal</span>
+    </div>
+    <svg viewBox="0 0 ${W} ${H+20}" class="w-full" style="height:96px">
+      <line x1="0" y1="${goalLineY.toFixed(1)}" x2="${W}" y2="${goalLineY.toFixed(1)}" stroke="#4f46e5" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.5"/>
+      <text x="${W-2}" y="${(goalLineY-3).toFixed(1)}" text-anchor="end" fill="#818cf8" font-size="8" font-family="-apple-system,sans-serif">Ziel</text>
+      ${bars}
+    </svg>
+  </div>
+
+  <!-- Daily Cards -->
+  <div class="mx-4 mb-4 space-y-2">
+    ${data.map(d => {
+      const isToday = d.date === today;
+      const dDate = new Date(d.date+'T12:00:00');
+      const label = dDate.toLocaleDateString('de-DE', { weekday:'short', day:'numeric', month:'short' });
+      const calPct = Math.min(d.totals.kcal / Math.max(sg.kcal, 1), 1);
+      const over = d.totals.kcal > sg.kcal;
+      return `
+      <div class="bg-slate-800/70 rounded-2xl px-4 py-3 border ${isToday?'border-indigo-500/40':'border-slate-700/30'} btn-active cursor-pointer"
+           data-hist-day="${h(d.date)}">
+        <div class="flex items-center justify-between">
+          <div class="flex-1 min-w-0">
+            <p class="font-semibold text-sm ${isToday?'text-indigo-400':''}">
+              ${h(label)}${isToday?' <span class="text-xs font-normal text-indigo-400/70">Heute</span>':''}
+            </p>
+            <div class="flex items-center gap-3 mt-1 flex-wrap">
+              <span class="text-amber-400 text-xs font-bold">${d.totals.kcal ? num(d.totals.kcal)+' kcal' : '–'}</span>
+              ${d.totals.protein ? `<span class="text-indigo-400 text-xs">P ${num(d.totals.protein,1)}g</span>` : ''}
+              ${d.weight ? `<span class="text-teal-400 text-xs">⚖ ${d.weight} kg</span>` : ''}
+            </div>
+            ${d.totals.kcal > 0 ? `
+            <div class="w-full h-1 bg-slate-700 rounded-full overflow-hidden mt-2">
+              <div class="h-full rounded-full" style="width:${(calPct*100).toFixed(0)}%;background:${over?'#ef4444':'#818cf8'}"></div>
+            </div>` : ''}
+          </div>
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" class="text-slate-600 shrink-0 ml-3"><path d="M9 18l6-6-6-6"/></svg>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
 // ─── FAVORITEN CARD (für idle-Suche) ────────────────────────
 function renderFavCard(food) {
   const fav = true;
@@ -1157,7 +1561,7 @@ function renderBottomNav() {
   const tabs = [
     { id: 'dashboard', icon: iconHome,   label: 'Heute'   },
     { id: 'search',    icon: iconSearch, label: 'Suchen'  },
-    { id: 'weight',    icon: iconScale,  label: 'Gewicht' },
+    { id: 'history',   icon: iconCalendar, label: 'Verlauf' },
     { id: 'settings',  icon: iconGear,   label: 'Ziele'   },
   ];
   return `
@@ -1193,7 +1597,8 @@ function iconHeart(w, fill) {
   const s = fill ? '#e11d48' : 'currentColor';
   return `<svg width="${w}" height="${w}" fill="${f}" stroke="${s}" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>`;
 }
-function iconScale(w) { return ico('<path d="M3 6l9-4 9 4M3 6v12l9 4 9-4V6M12 2v20M3 12h18"/>', w); }
+function iconScale(w)    { return ico('<path d="M3 6l9-4 9 4M3 6v12l9 4 9-4V6M12 2v20M3 12h18"/>', w); }
+function iconCalendar(w) { return ico('<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>', w); }
 
 // ═══════════════════════════════════════════════════════════
 //  EVENT BINDING
@@ -1360,7 +1765,7 @@ function bind() {
     });
   });
 
-  // ── Gewicht ──
+  // ── Gewicht (eigene View) ──
   const saveWeightBtn = $('btn-save-weight');
   if (saveWeightBtn) saveWeightBtn.addEventListener('click', () => {
     const v = parseFloat($('weight-inp')?.value);
@@ -1374,6 +1779,72 @@ function bind() {
       deleteWeightEntry(b.dataset.delWeight);
       render();
     });
+  });
+
+  // ── History ──
+  qs('#hist-day-btn')?.addEventListener('click', () => {
+    if (S.historyMode !== 'day') { S.historyMode = 'day'; S.historyData = null; loadDayData(S.historyDate); }
+  });
+  qs('#hist-week-btn')?.addEventListener('click', () => {
+    if (S.historyMode !== 'week') { S.historyMode = 'week'; S.historyWeekData = null; loadWeekData(S.historyDate); }
+  });
+  qs('#hist-prev')?.addEventListener('click', () => {
+    const d = new Date(S.historyDate + 'T12:00:00');
+    if (S.historyMode === 'day') {
+      d.setDate(d.getDate() - 1);
+      loadDayData(d.toISOString().slice(0, 10));
+    } else {
+      d.setDate(d.getDate() - 7);
+      S.historyWeekData = null;
+      loadWeekData(d.toISOString().slice(0, 10));
+    }
+  });
+  qs('#hist-next')?.addEventListener('click', () => {
+    const d = new Date(S.historyDate + 'T12:00:00');
+    const today = getToday();
+    if (S.historyMode === 'day') {
+      d.setDate(d.getDate() + 1);
+      const next = d.toISOString().slice(0, 10);
+      if (next <= today) loadDayData(next);
+    } else {
+      d.setDate(d.getDate() + 7);
+      const next = d.toISOString().slice(0, 10);
+      if (getWeekDates(next)[0] <= today) { S.historyWeekData = null; loadWeekData(next); }
+    }
+  });
+  // Click day card in week view → drill to day
+  document.querySelectorAll('[data-hist-day]').forEach(b => {
+    b.addEventListener('click', () => {
+      S.historyMode = 'day';
+      S.historyData = null;
+      loadDayData(b.dataset.histDay);
+    });
+  });
+  // Weight save in history day view
+  qs('#hist-save-weight')?.addEventListener('click', () => {
+    const v = parseFloat(qs('#hist-weight-inp')?.value);
+    if (!v || isNaN(v) || v < 20 || v > 500) { showToast('Bitte gültiges Gewicht eingeben', '#dc2626'); return; }
+    const kg = +v.toFixed(1);
+    const log = loadWeightLog();
+    const filtered = log.filter(e => e.date !== S.historyDate);
+    filtered.push({ date: S.historyDate, kg });
+    filtered.sort((a, b) => b.date.localeCompare(a.date));
+    saveWeightLog(filtered.slice(0, 90));
+    const sb = getSB();
+    if (sb) sb.from('gewicht').upsert({ datum: S.historyDate, gewicht_kg: kg }, { onConflict: 'datum' }).catch(() => {});
+    showToast(`${kg} kg gespeichert ✓`, '#059669');
+    render();
+  });
+
+  // ── Dashboard Expand ──
+  qs('#dash-expand-btn')?.addEventListener('click', () => {
+    S.dashExpanded = !S.dashExpanded;
+    if (S.dashExpanded && !S.dashNutrients) {
+      render(); // show spinner
+      calcAllNutrients(getTodayMeals()).then(n => { S.dashNutrients = n; render(); });
+    } else {
+      render();
+    }
   });
 }
 
