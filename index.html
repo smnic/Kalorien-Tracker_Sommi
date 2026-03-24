@@ -138,12 +138,12 @@ function getLebensmittelCache() {
 }
 
 async function syncLebensmittelCache() {
+  // No longer pre-loading all foods — Supabase is queried directly on search
+  // Just verify connectivity and seed if truly empty
   const sb = getSB(); if (!sb) return;
   try {
-    const { data, error } = await sb.from('lebensmittel').select('*');
-    if (error || !data) return;
-    if (data.length === 0) { await seedLebensmittel(); return; }
-    localStorage.setItem(KEYS.LEBENSMITTEL, JSON.stringify(data));
+    const { data } = await sb.from('lebensmittel').select('id').limit(1);
+    if (data && data.length === 0) await seedLebensmittel();
   } catch(e) {}
 }
 
@@ -391,20 +391,12 @@ const NATURAL_FOODS = [
 //  LOKALE SUCHE
 // ═══════════════════════════════════════════════════════════
 function searchLocalFoods(query) {
+  // Offline fallback: search NATURAL_FOODS when Supabase is unavailable
   const q = query.toLowerCase().trim();
   const terms = q.split(/\s+/);
-  const cache = getLebensmittelCache();
-  const foods = cache.length > 0
-    ? cache.map(row => ({
-        id: row.id, sbId: row.id, name: row.name,
-        kcal100: row.kalorien, protein100: row.protein,
-        carbs100: row.kohlenhydrate, fat100: row.fett,
-        local: true, brand: '', serving: 100, tags: '',
-      }))
-    : NATURAL_FOODS;
-  return foods
+  return NATURAL_FOODS
     .map(food => {
-      const haystack = (food.name + ' ' + (food.tags||'')).toLowerCase();
+      const haystack = (food.name + ' ' + food.tags).toLowerCase();
       const score = terms.reduce((s, t) => {
         if (food.name.toLowerCase().startsWith(t)) return s + 3;
         if (food.name.toLowerCase().includes(t))   return s + 2;
@@ -417,6 +409,27 @@ function searchLocalFoods(query) {
     .sort((a, b) => b.score - a.score)
     .slice(0, 8)
     .map(x => x.food);
+}
+
+async function searchSupabase(query) {
+  const sb = getSB(); if (!sb) return [];
+  try {
+    const terms = query.trim().split(/\s+/);
+    // Build ilike filter for each term (all must match)
+    let q = sb.from('lebensmittel')
+      .select('id, name, kalorien, protein, fett, kohlenhydrate, quelle')
+      .limit(12);
+    for (const t of terms) q = q.ilike('name', `*${t}*`);
+    const { data, error } = await q;
+    if (error || !data) return [];
+    return data.map(row => ({
+      id: row.id, sbId: row.id, name: row.name,
+      kcal100: row.kalorien ?? 0, protein100: row.protein ?? 0,
+      carbs100: row.kohlenhydrate ?? 0, fat100: row.fett ?? 0,
+      local: true, brand: row.quelle === 'BLS' ? 'BLS 4.0' : '',
+      serving: 100, tags: '',
+    }));
+  } catch(e) { return []; }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1437,35 +1450,50 @@ async function doSearch(query) {
   S.searchQuery = query;
   S.searchError = '';
 
-  // Favoriten die zur Suchanfrage passen
   const q = query.toLowerCase();
   const favHits = loadFavorites()
     .filter(f => f.name.toLowerCase().includes(q) || (f.tags||'').toLowerCase().includes(q))
     .map(f => ({ ...f, isFav: true }));
-
-  // 1. Sofort: lokale Datenbank + Favoriten anzeigen
-  const localHits = searchLocalFoods(query);
   const favNames = new Set(favHits.map(f => f.name.toLowerCase()));
-  const localOnly = localHits.filter(f => !favNames.has(f.name.toLowerCase()));
-  S.searchResults = [...favHits, ...localOnly];
-  S.searchState = 'done';
-  S.apiLoading = true;
+
+  // 1. Show favorites immediately
+  S.searchResults = [...favHits];
+  S.searchState = 'loading';
+  S.apiLoading = false;
   render();
   setTimeout(() => { const inp = $('search-input'); if (inp) inp.value = S.searchQuery; }, 20);
 
-  // 2. API im Hintergrund laden und Ergebnisse anfügen
-  try {
-    const apiResults = await searchFoods(query);
-    const allNames = new Set(S.searchResults.map(f => f.name.toLowerCase()));
-    const fresh = apiResults.filter(a => !allNames.has(a.name.toLowerCase()));
-    S.searchResults = [...favHits, ...localOnly, ...fresh];
-    if (S.searchResults.length === 0) showToast(`Keine Ergebnisse für „${query}"`, '#6b7280');
-  } catch (e) {
-    S.searchError = e.name === 'AbortError'
-      ? 'Online-Suche: Zeitüberschreitung.'
-      : 'Online-Suche nicht verfügbar (kein Internet).';
+  // 2. Search Supabase (primary source — 7140 BLS foods)
+  let sbHits = await searchSupabase(query);
+  sbHits = sbHits.filter(f => !favNames.has(f.name.toLowerCase()));
+
+  // 3. If Supabase offline/empty, fall back to local NATURAL_FOODS
+  if (sbHits.length === 0) {
+    const localHits = searchLocalFoods(query);
+    sbHits = localHits.filter(f => !favNames.has(f.name.toLowerCase()));
   }
-  S.apiLoading = false;
+
+  S.searchResults = [...favHits, ...sbHits];
+  S.searchState = 'done';
+
+  // 4. Only call OpenFoodFacts if Supabase returned fewer than 3 results
+  if (sbHits.length < 3) {
+    S.apiLoading = true;
+    render();
+    setTimeout(() => { const inp = $('search-input'); if (inp) inp.value = S.searchQuery; }, 20);
+    try {
+      const apiResults = await searchFoods(query);
+      const allNames = new Set(S.searchResults.map(f => f.name.toLowerCase()));
+      const fresh = apiResults.filter(a => !allNames.has(a.name.toLowerCase()));
+      S.searchResults = [...favHits, ...sbHits, ...fresh];
+    } catch (e) {
+      if (sbHits.length === 0)
+        S.searchError = e.name === 'AbortError' ? 'Online-Suche: Zeitüberschreitung.' : 'Online-Suche nicht verfügbar.';
+    }
+    S.apiLoading = false;
+  }
+
+  if (S.searchResults.length === 0) showToast(`Keine Ergebnisse für „${query}"`, '#6b7280');
   render();
   setTimeout(() => { const inp = $('search-input'); if (inp) inp.value = S.searchQuery; }, 20);
 }
