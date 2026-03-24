@@ -197,7 +197,7 @@ async function addEintragToSupabase(meal, localId) {
     const lmId = meal.lmId || await findOrCreateLebensmittel(meal);
     if (!lmId) return;
     const { data } = await sb.from('eintraege').insert({
-      datum: getToday(), lebensmittel_id: lmId, menge_gramm: meal.grams || 100, notiz: '',
+      date: getToday(), lebensmittel_id: lmId, menge_gramm: meal.grams || 100,
     }).select('id').single();
     if (data?.id) {
       const log = loadLog(); const d = getToday();
@@ -212,7 +212,7 @@ async function syncTodayFromSupabase() {
     const today = getToday();
     const { data: eintraege, error } = await sb.from('eintraege')
       .select('id, menge_gramm, lebensmittel_id')
-      .eq('datum', today).order('id', { ascending: false });
+      .eq('date', today).order('id', { ascending: false });
     if (error || !eintraege || eintraege.length === 0) return;
     const lmIds = [...new Set(eintraege.map(e => e.lebensmittel_id))];
     const { data: lmData } = await sb.from('lebensmittel')
@@ -307,7 +307,7 @@ async function loadDayData(date) {
     if (sb) {
       const { data: eintraege } = await sb.from('eintraege')
         .select('id, menge_gramm, lebensmittel_id')
-        .eq('datum', date).order('id', { ascending: false });
+        .eq('date', date).order('id', { ascending: false });
       if (eintraege && eintraege.length > 0) {
         const lmIds = [...new Set(eintraege.map(e => e.lebensmittel_id))];
         const { data: lmData } = await sb.from('lebensmittel')
@@ -342,8 +342,8 @@ async function loadWeekData(date) {
     let eintraegeByDate = {};
     if (sb) {
       const { data } = await sb.from('eintraege')
-        .select('id, menge_gramm, lebensmittel_id, datum')
-        .gte('datum', dates[0]).lte('datum', dates[6]);
+        .select('id, menge_gramm, lebensmittel_id, date')
+        .gte('date', dates[0]).lte('date', dates[6]);
       if (data && data.length > 0) {
         const lmIds = [...new Set(data.map(e => e.lebensmittel_id))];
         let lmMap = {};
@@ -353,9 +353,9 @@ async function loadWeekData(date) {
           lmMap = Object.fromEntries((lmData||[]).map(l => [l.id, l]));
         }
         for (const e of data) {
-          if (!eintraegeByDate[e.datum]) eintraegeByDate[e.datum] = [];
+          if (!eintraegeByDate[e.date]) eintraegeByDate[e.date] = [];
           const g = e.menge_gramm||100; const f=g/100; const l=lmMap[e.lebensmittel_id]||{};
-          eintraegeByDate[e.datum].push({ id:e.id, sbId:e.id, lmId:e.lebensmittel_id, name:l.name||'', grams:g,
+          eintraegeByDate[e.date].push({ id:e.id, sbId:e.id, lmId:e.lebensmittel_id, name:l.name||'', grams:g,
             kcal:Math.round((l.kalorien||0)*f), protein:+((l.protein||0)*f).toFixed(1),
             carbs:+((l.kohlenhydrate||0)*f).toFixed(1), fat:+((l.fett||0)*f).toFixed(1),
             kcal100:l.kalorien||0, protein100:l.protein||0, carbs100:l.kohlenhydrate||0, fat100:l.fett||0 });
