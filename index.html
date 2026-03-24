@@ -124,7 +124,7 @@ function deleteMealFromLog(id) {
 //  SUPABASE
 // ═══════════════════════════════════════════════════════════
 const SUPABASE_URL = 'https://fitijuyglbteoavrqdhy.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_xVKey0gjzia3yYT03QaFeA_cTCHRKzN';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpdGlqdXlnbGJ0ZW9hdnJxZGh5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNzI4ODEsImV4cCI6MjA4OTk0ODg4MX0.-o75ycsjZHQ7VjZgltSjTZeAwhUehzgWLNaydRLriGk';
 let _sb = null;
 
 function getSB() {
@@ -201,12 +201,17 @@ async function syncTodayFromSupabase() {
   const sb = getSB(); if (!sb) return;
   try {
     const today = getToday();
-    const { data, error } = await sb.from('eintraege')
-      .select('id, menge_gramm, lebensmittel(id, name, kalorien, protein, fett, kohlenhydrate)')
+    const { data: eintraege, error } = await sb.from('eintraege')
+      .select('id, menge_gramm, lebensmittel_id')
       .eq('datum', today).order('id', { ascending: false });
-    if (error || !data) return;
-    const meals = data.map(e => {
-      const g = e.menge_gramm || 100; const f = g / 100; const l = e.lebensmittel || {};
+    if (error || !eintraege || eintraege.length === 0) return;
+    const lmIds = [...new Set(eintraege.map(e => e.lebensmittel_id))];
+    const { data: lmData } = await sb.from('lebensmittel')
+      .select('id, name, kalorien, protein, fett, kohlenhydrate')
+      .in('id', lmIds);
+    const lmMap = Object.fromEntries((lmData||[]).map(l => [l.id, l]));
+    const meals = eintraege.map(e => {
+      const g = e.menge_gramm || 100; const f = g / 100; const l = lmMap[e.lebensmittel_id] || {};
       return { id: e.id, sbId: e.id, name: l.name || '',
         kcal: Math.round((l.kalorien||0)*f), protein: +((l.protein||0)*f).toFixed(1),
         carbs: +((l.kohlenhydrate||0)*f).toFixed(1), fat: +((l.fett||0)*f).toFixed(1), grams: g };
@@ -418,9 +423,9 @@ function searchLocalFoods(query) {
 //  OPEN FOOD FACTS API
 // ═══════════════════════════════════════════════════════════
 async function searchFoods(query) {
-  const url = `https://world.openfoodfacts.org/cgi/search.pl?`
-    + `search_terms=${encodeURIComponent(query)}&json=1&page_size=20`
-    + `&fields=product_name,brands,nutriments,serving_quantity`;
+  const url = `https://world.openfoodfacts.org/api/v2/search?`
+    + `search_terms=${encodeURIComponent(query)}&page_size=20`
+    + `&fields=product_name,brands,nutriments,serving_quantity&json=1`;
   const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
   const d = await r.json();
   return (d.products || [])
