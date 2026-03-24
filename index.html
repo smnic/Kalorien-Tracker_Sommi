@@ -117,15 +117,18 @@ function addMealToLog(meal) {
   addEintragToSupabase(meal, localId).catch(() => {});
 }
 
-function deleteMealFromLog(id) {
+async function deleteMealFromLog(id) {
   const log = loadLog();
   const d = getToday();
   if (log[d]) {
     const entry = log[d].find(m => m.id === id);
-    if (entry?.sbId) getSB()?.from('eintraege').delete().eq('id', entry.sbId).catch(() => {});
     log[d] = log[d].filter(m => m.id !== id);
     saveLogData(log);
-    S.dashNutrients = null; // invalidate cached extended nutrients
+    S.dashNutrients = null;
+    if (entry?.sbId) {
+      const sb = getSB();
+      if (sb) await sb.from('eintraege').delete().eq('id', entry.sbId);
+    }
   }
 }
 
@@ -917,7 +920,7 @@ function renderSearch() {
       <h1 class="text-2xl font-black tracking-tight mb-4">Lebensmittel suchen</h1>
       <div class="relative">
         <input id="search-input" type="search" inputmode="search" autocomplete="off"
-          placeholder="z.B. Hähnchenbrust, Vollkornbrot…"
+          placeholder="z.B. Tofu, Vollkornbrot…"
           value="${h(S.searchQuery)}"
           class="w-full bg-slate-800 border border-slate-700 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 rounded-2xl px-5 py-3.5 pr-14 text-white placeholder-slate-600 outline-none transition-all text-sm"/>
         <button id="btn-search"
@@ -925,7 +928,6 @@ function renderSearch() {
           ${iconSearch(18)}
         </button>
       </div>
-      <p class="text-xs text-slate-600 mt-2 ml-1">Daten von Open Food Facts (CC BY-SA)</p>
     </div>
     ${content}
   </div>`;
@@ -1178,7 +1180,7 @@ function renderManualModal() {
         <div class="space-y-3">
           <div>
             <label class="text-slate-400 text-xs block mb-1.5 font-medium">Name *</label>
-            <input id="mn-name" type="text" value="${h(e.name)}" placeholder="z.B. Hähnchenbrust gegrillt"
+            <input id="mn-name" type="text" value="${h(e.name)}" placeholder="z.B. Tofu gegrillt"
               class="w-full bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl px-4 py-3 text-white outline-none placeholder-slate-600 text-sm"/>
           </div>
           <div class="grid grid-cols-2 gap-3">
@@ -1729,8 +1731,8 @@ function bind() {
   if (fabAdd) fabAdd.addEventListener('click', openManualModal);
 
   document.querySelectorAll('[data-del]').forEach(b => {
-    b.addEventListener('click', () => {
-      deleteMealFromLog(+b.dataset.del);
+    b.addEventListener('click', async () => {
+      await deleteMealFromLog(+b.dataset.del);
       render();
     });
   });
