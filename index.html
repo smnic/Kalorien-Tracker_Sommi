@@ -394,6 +394,9 @@ const S = {
   manualForm: { name: '', kcal: '', protein: '', carbs: '', fat: '', grams: '' },
   apiLoading: false,
   settingsMode: 'g', // 'g' | 'pct'
+  showEditModal: false,
+  editMealId: null,
+  editMealGrams: 100,
   historyMode: 'day',
   historyDate: getToday(),
   historyData: null,
@@ -634,7 +637,8 @@ function render() {
     renderView()
     + renderBottomNav()
     + (S.showFoodModal   ? renderFoodModal()   : '')
-    + (S.showManualModal ? renderManualModal() : '');
+    + (S.showManualModal ? renderManualModal() : '')
+    + (S.showEditModal   ? renderEditModal()   : '');
   bind();
 }
 
@@ -665,101 +669,105 @@ function renderDashboard() {
   const rem     = { kcal: sg.kcal - totals.kcal, protein: sg.protein - totals.protein,
                     carbs: sg.carbs - totals.carbs, fat: sg.fat - totals.fat };
   const calPct  = pct(totals.kcal, sg.kcal);
-  const R = 62, C = 2 * Math.PI * R;
+  const R = 52, C = 2 * Math.PI * R;
   const off = C * (1 - Math.min(calPct, 1));
   const ringColor = calPct > 1 ? '#ef4444' : calPct > 0.85 ? '#f59e0b' : '#818cf8';
   const dateStr = new Date().toLocaleDateString('de-DE', { weekday:'long', day:'numeric', month:'long' });
+  const todayWeight = loadWeightLog().find(e => e.date === getToday());
 
   return `
   <div class="flex-1 overflow-y-auto pb-28 pt-safe">
 
     <!-- Header -->
-    <div class="px-5 pt-6 pb-2 flex items-center justify-between">
+    <div class="px-5 pt-6 pb-3 flex items-center justify-between">
       <div>
-        <p class="text-slate-400 text-xs capitalize tracking-wide">${h(dateStr)}</p>
-        <h1 class="text-2xl font-black mt-0.5 tracking-tight">Übersicht</h1>
+        <p class="text-slate-500 text-xs capitalize tracking-wide">${h(dateStr)}</p>
+        <h1 class="text-xl font-black mt-0.5 tracking-tight">Übersicht</h1>
       </div>
       <div class="flex items-center gap-2">
         <button id="btn-dash-search"
-          class="btn-active bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-2xl p-2.5 shadow-md"
+          class="btn-active bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-400 rounded-2xl p-2.5"
           title="Lebensmittel suchen">
           ${iconSearch(20)}
         </button>
         <button id="btn-add-fab"
-          class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl px-4 py-2.5 flex items-center gap-2 font-bold text-sm shadow-lg shadow-indigo-900/40">
-          ${iconPlus(16)} Eintrag
+          class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl px-4 py-2.5 flex items-center gap-1.5 font-bold text-sm shadow-lg shadow-indigo-900/40">
+          ${iconPlus(15)} Eintrag
         </button>
       </div>
     </div>
 
-    <!-- Calorie Card -->
-    <div class="mx-4 mt-3 bg-gradient-to-br from-slate-800 to-slate-800/60 rounded-3xl p-5 shadow-xl border border-slate-700/40">
+    <!-- Calorie Card (ring + stats + weight) -->
+    <div class="mx-4 bg-slate-800/80 rounded-3xl p-4 border border-slate-700/40">
       <div class="flex items-center gap-4">
         <!-- Ring -->
         <div class="relative shrink-0">
-          <svg width="148" height="148" viewBox="0 0 148 148">
-            <circle cx="74" cy="74" r="${R}" class="ring-track"/>
-            <circle cx="74" cy="74" r="${R}" class="ring-fill"
+          <svg width="124" height="124" viewBox="0 0 124 124">
+            <circle cx="62" cy="62" r="${R}" class="ring-track"/>
+            <circle cx="62" cy="62" r="${R}" class="ring-fill"
               stroke="${ringColor}"
               stroke-dasharray="${C.toFixed(2)}"
               stroke-dashoffset="${off.toFixed(2)}"/>
-            <text x="74" y="68" text-anchor="middle" fill="white" font-size="24"
+            <text x="62" y="57" text-anchor="middle" fill="white" font-size="20"
               font-weight="900" font-family="-apple-system,sans-serif" letter-spacing="-1">
               ${num(calPct * 100)}%
             </text>
-            <text x="74" y="86" text-anchor="middle" fill="#64748b" font-size="11"
+            <text x="62" y="72" text-anchor="middle" fill="#475569" font-size="10"
               font-family="-apple-system,sans-serif">konsumiert</text>
           </svg>
         </div>
         <!-- Stats -->
         <div class="flex-1 min-w-0">
-          <div class="mb-3">
-            <p class="text-slate-400 text-xs mb-0.5">Verbleibend</p>
-            <p class="text-3xl font-black leading-none ${rem.kcal < 0 ? 'text-red-400' : 'text-white'}">
-              ${num(Math.abs(rem.kcal))}
-            </p>
-            <p class="text-slate-500 text-xs mt-0.5">${rem.kcal < 0 ? 'kcal überschritten' : 'kcal übrig'}</p>
-          </div>
-          <div class="space-y-1.5">
-            <div class="flex justify-between text-xs">
-              <span class="text-slate-500">Gegessen</span>
-              <span class="text-indigo-400 font-semibold">${num(totals.kcal)} kcal</span>
-            </div>
-            <div class="flex justify-between text-xs">
-              <span class="text-slate-500">Ziel</span>
-              <span class="text-slate-300 font-semibold">${sg.kcal} kcal</span>
-            </div>
+          <p class="text-slate-500 text-xs">Verbleibend</p>
+          <p class="text-3xl font-black leading-tight ${rem.kcal < 0 ? 'text-red-400' : 'text-white'}">
+            ${num(Math.abs(rem.kcal))}<span class="text-sm font-normal text-slate-500 ml-1">kcal</span>
+          </p>
+          <p class="text-slate-600 text-xs mb-3">${rem.kcal < 0 ? 'überschritten' : 'von ' + sg.kcal + ' kcal'}</p>
+          <div class="flex justify-between text-xs text-slate-500">
+            <span>Gegessen</span><span class="text-indigo-400 font-semibold">${num(totals.kcal)} kcal</span>
           </div>
         </div>
+      </div>
+      <!-- Weight row inside card -->
+      <div class="mt-3 pt-3 border-t border-slate-700/50 flex items-center gap-2">
+        <div class="text-slate-600 shrink-0">${iconScale(15)}</div>
+        <input id="dash-weight-inp" type="number" inputmode="decimal" step="0.1" min="20" max="300"
+          value="${todayWeight ? todayWeight.kg : ''}" placeholder="Gewicht eintragen (kg)"
+          class="flex-1 bg-transparent border-none outline-none text-sm text-white placeholder-slate-600 font-medium"/>
+        <button id="dash-save-weight"
+          class="btn-active shrink-0 text-xs font-semibold px-3 py-1.5 rounded-xl transition-colors
+            ${todayWeight ? 'text-emerald-400 bg-emerald-400/10' : 'bg-slate-700 hover:bg-slate-600 text-slate-300'}">
+          ${todayWeight ? '✓ ' + todayWeight.kg + ' kg' : 'Speichern'}
+        </button>
       </div>
     </div>
 
     <!-- Macro Bars -->
-    <div class="mx-4 mt-3 grid grid-cols-3 gap-2.5">
+    <div class="mx-4 mt-2.5 grid grid-cols-3 gap-2">
       ${macroCard('Protein',  num(totals.protein,1), sg.protein,  '#818cf8', 'g')}
       ${macroCard('Kohlenhydr.', num(totals.carbs,1), sg.carbs, '#34d399', 'g')}
       ${macroCard('Fett',     num(totals.fat,1),    sg.fat,     '#fb923c', 'g')}
     </div>
 
     <!-- Extended Nutrients Expandable -->
-    <div class="mx-4 mt-3">
+    <div class="mx-4 mt-2.5">
       <button id="dash-expand-btn"
-        class="btn-active w-full bg-slate-800/70 border border-slate-700/30 rounded-2xl px-4 py-3 flex items-center justify-between transition-colors hover:border-slate-600/50">
-        <span class="text-sm font-semibold text-slate-400">Erweiterte Nährwerte</span>
-        <svg class="chevron-anim ${S.dashExpanded ? 'chevron-rot' : ''}" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7"/></svg>
+        class="btn-active w-full bg-slate-800/70 border border-slate-700/30 rounded-2xl px-4 py-2.5 flex items-center justify-between transition-colors hover:border-slate-600/50">
+        <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Erweiterte Nährwerte</span>
+        <svg class="chevron-anim ${S.dashExpanded ? 'chevron-rot' : ''}" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M19 9l-7 7-7-7"/></svg>
       </button>
       ${S.dashExpanded ? `
-      <div class="mt-1.5 bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30 slide-in">
+      <div class="mt-1 bg-slate-800/70 rounded-2xl p-4 border border-slate-700/30 slide-in">
         ${S.dashNutrients === null
-          ? `<div class="flex items-center justify-center gap-2 py-2">
-              <div class="w-4 h-4 rounded-full border border-indigo-500 border-t-transparent spin"></div>
-              <span class="text-slate-500 text-xs">Lade erweiterte Nährwerte…</span>
+          ? `<div class="flex items-center justify-center gap-2 py-1">
+              <div class="w-3.5 h-3.5 rounded-full border border-indigo-500 border-t-transparent spin"></div>
+              <span class="text-slate-500 text-xs">Lade Nährwerte…</span>
              </div>`
           : (() => {
               const visible = NUTRIENT_EXT_KEYS.filter(k => S.dashNutrients[k] > 0);
               return visible.length === 0
-                ? `<p class="text-slate-600 text-xs text-center py-2">Keine erweiterten Daten – füge BLS-Lebensmittel hinzu.</p>`
-                : `<div class="grid grid-cols-2 gap-x-4 gap-y-2">
+                ? `<p class="text-slate-600 text-xs text-center py-1">Keine erweiterten Daten – füge BLS-Lebensmittel hinzu.</p>`
+                : `<div class="grid grid-cols-2 gap-x-4 gap-y-1.5">
                     ${visible.map(k => `
                       <div class="flex justify-between items-center">
                         <span class="text-slate-500 text-xs">${NUTRIENT_LABELS[k]}</span>
@@ -771,25 +779,9 @@ function renderDashboard() {
       </div>` : ''}
     </div>
 
-    <!-- Weight Entry -->
-    ${(() => {
-      const todayWeight = loadWeightLog().find(e => e.date === getToday());
-      return `
-    <div class="mx-4 mt-3 bg-slate-800/70 rounded-2xl p-3.5 border border-slate-700/30 flex items-center gap-3">
-      ${iconScale(18)}
-      <input id="dash-weight-inp" type="number" inputmode="decimal" step="0.1" min="20" max="300"
-        value="${todayWeight ? todayWeight.kg : ''}" placeholder="Gewicht heute (kg)"
-        class="flex-1 bg-transparent border-none outline-none text-white text-sm placeholder-slate-600 font-medium"/>
-      <button id="dash-save-weight"
-        class="btn-active bg-slate-700 hover:bg-slate-600 text-slate-300 font-semibold px-3 py-1.5 rounded-xl text-xs shrink-0 transition-colors">
-        ${todayWeight ? '✓ ' + todayWeight.kg + ' kg' : 'Speichern'}
-      </button>
-    </div>`;
-    })()}
-
     <!-- Meals Section -->
     <div class="mx-4 mt-4">
-      <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Heutige Mahlzeiten</p>
+      <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2.5">Heutige Mahlzeiten</p>
       ${meals.length === 0
         ? `<div class="bg-slate-800/50 rounded-2xl p-8 text-center border border-slate-700/30">
             <div class="text-4xl mb-2">🥗</div>
@@ -820,20 +812,31 @@ function macroCard(label, val, goal, color, unit) {
 
 function renderMealRow(m) {
   return `
-  <div class="bg-slate-800/70 rounded-2xl px-4 py-3.5 flex items-center gap-3 border border-slate-700/30 slide-in">
+  <div class="bg-slate-800/70 rounded-2xl px-4 py-3 flex items-center gap-3 border border-slate-700/30 slide-in">
     <div class="flex-1 min-w-0">
       <p class="font-semibold text-sm leading-snug truncate">${h(m.name)}</p>
-      <p class="text-slate-500 text-xs mt-0.5">${m.grams ? m.grams+'g · ' : ''}${num(m.kcal)} kcal</p>
-      <div class="flex gap-3 mt-1.5">
-        <span class="text-xs text-indigo-400 font-medium">P ${num(m.protein,1)}g</span>
-        <span class="text-xs text-emerald-400 font-medium">K ${num(m.carbs,1)}g</span>
-        <span class="text-xs text-orange-400 font-medium">F ${num(m.fat,1)}g</span>
+      <div class="flex items-center gap-2 mt-0.5">
+        <span class="text-amber-400 text-xs font-semibold">${num(m.kcal)} kcal</span>
+        ${m.grams ? `<span class="text-slate-600 text-xs">·</span><span class="text-slate-500 text-xs">${m.grams} g</span>` : ''}
+      </div>
+      <div class="flex gap-3 mt-1">
+        <span class="text-xs text-indigo-400">P ${num(m.protein,1)}g</span>
+        <span class="text-xs text-emerald-400">K ${num(m.carbs,1)}g</span>
+        <span class="text-xs text-orange-400">F ${num(m.fat,1)}g</span>
       </div>
     </div>
-    <button data-del="${m.id}"
-      class="btn-active text-slate-600 hover:text-red-400 p-2 rounded-xl hover:bg-red-400/10 transition-colors">
-      ${iconTrash(18)}
-    </button>
+    <div class="flex items-center gap-1 shrink-0">
+      <button data-edit="${m.id}"
+        class="btn-active text-slate-600 hover:text-indigo-400 p-2 rounded-xl hover:bg-indigo-400/10 transition-colors"
+        title="Bearbeiten">
+        ${iconEdit(16)}
+      </button>
+      <button data-del="${m.id}"
+        class="btn-active text-slate-600 hover:text-red-400 p-2 rounded-xl hover:bg-red-400/10 transition-colors"
+        title="Löschen">
+        ${iconTrash(16)}
+      </button>
+    </div>
   </div>`;
 }
 
@@ -1212,6 +1215,77 @@ function renderManualModal() {
       </div>
     </div>
   </div>`;
+}
+
+// ─── EDIT MEAL MODAL ────────────────────────────────────────
+function renderEditModal() {
+  const log = loadLog();
+  const meal = (log[getToday()] || []).find(m => m.id === S.editMealId);
+  if (!meal) return '';
+  const g = S.editMealGrams;
+  const f = g / 100;
+  return `
+  <div id="edit-modal-bg" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-end">
+    <div class="modal-enter w-full max-w-md mx-auto bg-slate-800 rounded-t-3xl shadow-2xl border-t border-slate-700/50">
+      <div class="w-10 h-1 bg-slate-600 rounded-full mx-auto mt-4 mb-4"></div>
+      <div class="px-6 pb-6">
+        <p class="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-1">Eintrag bearbeiten</p>
+        <h2 class="font-black text-lg leading-snug mb-4 line-clamp-1">${h(meal.name)}</h2>
+        <p class="text-slate-400 text-xs mb-2 font-medium">Menge in Gramm</p>
+        <div class="flex items-center gap-3 mb-4">
+          <button id="btn-edit-dec"
+            class="btn-active bg-slate-700 hover:bg-slate-600 w-11 h-11 rounded-xl font-black text-xl flex items-center justify-center">−</button>
+          <input type="number" id="edit-grams-inp" inputmode="decimal" value="${g}" min="1" max="9999"
+            class="flex-1 bg-slate-700 border border-slate-600 focus:border-indigo-500 rounded-xl py-3 text-center font-bold text-white outline-none text-base"/>
+          <button id="btn-edit-inc"
+            class="btn-active bg-slate-700 hover:bg-slate-600 w-11 h-11 rounded-xl font-black text-xl flex items-center justify-center">+</button>
+        </div>
+        <div id="edit-preview" class="grid grid-cols-4 gap-2 bg-slate-700/40 rounded-2xl p-4 mb-4">
+          ${editPreviewCells(meal, f)}
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <button id="btn-edit-cancel"
+            class="btn-active bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3.5 rounded-2xl">Abbrechen</button>
+          <button id="btn-edit-save"
+            class="btn-active bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-2xl shadow-lg shadow-indigo-900/30">Speichern</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function editPreviewCells(meal, f) {
+  return `
+    <div class="text-center"><p id="ep-kcal" class="text-amber-400 font-black text-lg">${num((meal.kcal100||0)*f)}</p><p class="text-slate-500 text-xs mt-0.5">kcal</p></div>
+    <div class="text-center"><p id="ep-prot" class="text-indigo-400 font-black text-lg">${num((meal.protein100||0)*f,1)}</p><p class="text-slate-500 text-xs mt-0.5">Prot. g</p></div>
+    <div class="text-center"><p id="ep-carb" class="text-emerald-400 font-black text-lg">${num((meal.carbs100||0)*f,1)}</p><p class="text-slate-500 text-xs mt-0.5">KH g</p></div>
+    <div class="text-center"><p id="ep-fat"  class="text-orange-400 font-black text-lg">${num((meal.fat100||0)*f,1)}</p><p class="text-slate-500 text-xs mt-0.5">Fett g</p></div>`;
+}
+
+function updateEditPreview() {
+  const log = loadLog();
+  const meal = (log[getToday()] || []).find(m => m.id === S.editMealId);
+  if (!meal) return;
+  const f = S.editMealGrams / 100;
+  const el = $('edit-preview');
+  if (el) el.innerHTML = editPreviewCells(meal, f);
+}
+
+function updateMealInLog(id, newGrams) {
+  const log = loadLog();
+  const d = getToday();
+  if (!log[d]) return;
+  const meal = log[d].find(m => m.id === id);
+  if (!meal) return;
+  const f = newGrams / 100;
+  meal.grams   = newGrams;
+  meal.kcal    = num((meal.kcal100    || 0) * f);
+  meal.protein = num((meal.protein100 || 0) * f, 1);
+  meal.carbs   = num((meal.carbs100   || 0) * f, 1);
+  meal.fat     = num((meal.fat100     || 0) * f, 1);
+  saveLogData(log);
+  S.dashNutrients = null;
+  if (meal.sbId) getSB()?.from('eintraege').update({ menge_gramm: newGrams }).eq('id', meal.sbId).catch(() => {});
 }
 
 // ─── WEIGHT VIEW ────────────────────────────────────────────
@@ -1616,6 +1690,7 @@ function iconHeart(w, fill) {
 }
 function iconScale(w)    { return ico('<path d="M3 6l9-4 9 4M3 6v12l9 4 9-4V6M12 2v20M3 12h18"/>', w); }
 function iconCalendar(w) { return ico('<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>', w); }
+function iconEdit(w)     { return ico('<path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>', w); }
 
 // ═══════════════════════════════════════════════════════════
 //  EVENT BINDING
@@ -1651,6 +1726,19 @@ function bind() {
   document.querySelectorAll('[data-del]').forEach(b => {
     b.addEventListener('click', () => {
       deleteMealFromLog(+b.dataset.del);
+      render();
+    });
+  });
+
+  document.querySelectorAll('[data-edit]').forEach(b => {
+    b.addEventListener('click', () => {
+      const id = +b.dataset.edit;
+      const log = loadLog();
+      const meal = (log[getToday()] || []).find(m => m.id === id);
+      if (!meal) return;
+      S.editMealId = id;
+      S.editMealGrams = meal.grams || 100;
+      S.showEditModal = true;
       render();
     });
   });
@@ -1706,6 +1794,37 @@ function bind() {
 
   const madd = $('btn-modal-add');
   if (madd) madd.addEventListener('click', commitFoodAdd);
+
+  // ── Edit Meal Modal ──
+  const editBg = $('edit-modal-bg');
+  if (editBg) editBg.addEventListener('click', e => { if (e.target === editBg) { S.showEditModal = false; render(); } });
+
+  $('btn-edit-cancel')?.addEventListener('click', () => { S.showEditModal = false; render(); });
+
+  const editInp = $('edit-grams-inp');
+  if (editInp) {
+    editInp.addEventListener('input', e => {
+      const v = parseInt(e.target.value);
+      if (v > 0) { S.editMealGrams = v; updateEditPreview(); }
+    });
+  }
+  $('btn-edit-dec')?.addEventListener('click', () => {
+    S.editMealGrams = Math.max(1, S.editMealGrams - 10);
+    const inp = $('edit-grams-inp'); if (inp) inp.value = S.editMealGrams;
+    updateEditPreview();
+  });
+  $('btn-edit-inc')?.addEventListener('click', () => {
+    S.editMealGrams += 10;
+    const inp = $('edit-grams-inp'); if (inp) inp.value = S.editMealGrams;
+    updateEditPreview();
+  });
+  $('btn-edit-save')?.addEventListener('click', () => {
+    const g = Math.max(1, parseInt($('edit-grams-inp')?.value) || S.editMealGrams);
+    updateMealInLog(S.editMealId, g);
+    S.showEditModal = false;
+    showToast('Eintrag aktualisiert ✓', '#059669');
+    render();
+  });
 
   // ── Manual Modal ──
   const mmancancel = $('btn-man-cancel');
