@@ -10,6 +10,7 @@
   <meta name="theme-color" content="#0f172a" />
   <title>KalorienTracker</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
     * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overscroll-behavior: none; }
@@ -44,7 +45,7 @@
 // ═══════════════════════════════════════════════════════════
 //  STORAGE HELPERS
 // ═══════════════════════════════════════════════════════════
-const KEYS = { SETTINGS: 'kal_settings', LOG: 'kal_log', FAVORITES: 'kal_favs', WEIGHT: 'kal_weight' };
+const KEYS = { SETTINGS: 'kal_settings', LOG: 'kal_log', FAVORITES: 'kal_favs', WEIGHT: 'kal_weight', LEBENSMITTEL: 'kal_lm' };
 
 const DEFAULT_SETTINGS = { kcal: 2000, protein: 150, carbs: 220, fat: 65 };
 
@@ -85,9 +86,13 @@ function addWeightEntry(kg) {
   const filtered = log.filter(e => e.date !== today);
   filtered.unshift({ date: today, kg });
   saveWeightLog(filtered.slice(0, 90));
+  const sb = getSB();
+  if (sb) sb.from('gewicht').upsert({ datum: today, gewicht_kg: kg }, { onConflict: 'datum' }).catch(() => {});
 }
 function deleteWeightEntry(date) {
   saveWeightLog(loadWeightLog().filter(e => e.date !== date));
+  const sb = getSB();
+  if (sb) sb.from('gewicht').delete().eq('datum', date).catch(() => {});
 }
 
 function getToday() { return new Date().toISOString().slice(0, 10); }
@@ -98,14 +103,134 @@ function addMealToLog(meal) {
   const log = loadLog();
   const d = getToday();
   if (!log[d]) log[d] = [];
-  log[d].unshift({ id: Date.now() + Math.random(), ...meal });
+  const localId = Date.now() + Math.random();
+  log[d].unshift({ id: localId, sbId: null, ...meal });
   saveLogData(log);
+  addEintragToSupabase(meal, localId).catch(() => {});
 }
 
 function deleteMealFromLog(id) {
   const log = loadLog();
   const d = getToday();
-  if (log[d]) { log[d] = log[d].filter(m => m.id !== id); saveLogData(log); }
+  if (log[d]) {
+    const entry = log[d].find(m => m.id === id);
+    if (entry?.sbId) getSB()?.from('eintraege').delete().eq('id', entry.sbId).catch(() => {});
+    log[d] = log[d].filter(m => m.id !== id);
+    saveLogData(log);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  SUPABASE
+// ═══════════════════════════════════════════════════════════
+const SUPABASE_URL = 'https://fitijuyglbteoavrqdhy.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_xVKey0gjzia3yYT03QaFeA_cTCHRKzN';
+let _sb = null;
+
+function getSB() {
+  if (!_sb && window.supabase) _sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  return _sb;
+}
+
+function getLebensmittelCache() {
+  try { return JSON.parse(localStorage.getItem(KEYS.LEBENSMITTEL) || '[]'); }
+  catch { return []; }
+}
+
+async function syncLebensmittelCache() {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const { data, error } = await sb.from('lebensmittel').select('*');
+    if (error || !data) return;
+    if (data.length === 0) { await seedLebensmittel(); return; }
+    localStorage.setItem(KEYS.LEBENSMITTEL, JSON.stringify(data));
+  } catch(e) {}
+}
+
+async function seedLebensmittel() {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const rows = NATURAL_FOODS.map(f => ({
+      name: f.name, kalorien: f.kcal100, protein: f.protein100,
+      fett: f.fat100, kohlenhydrate: f.carbs100, zucker: 0, salz: 0,
+    }));
+    for (let i = 0; i < rows.length; i += 50)
+      await sb.from('lebensmittel').insert(rows.slice(i, i + 50));
+    const { data } = await sb.from('lebensmittel').select('*');
+    if (data) localStorage.setItem(KEYS.LEBENSMITTEL, JSON.stringify(data));
+  } catch(e) { console.warn('Seed failed:', e); }
+}
+
+async function findOrCreateLebensmittel(meal) {
+  const sb = getSB(); if (!sb) return null;
+  try {
+    const g = meal.grams || 100; const ratio = g / 100;
+    const kcal100  = meal.kcal100    ?? Math.round((meal.kcal    || 0) / ratio);
+    const prot100  = meal.protein100 ?? +((meal.protein || 0) / ratio).toFixed(1);
+    const carbs100 = meal.carbs100   ?? +((meal.carbs   || 0) / ratio).toFixed(1);
+    const fat100   = meal.fat100     ?? +((meal.fat     || 0) / ratio).toFixed(1);
+    const cache = getLebensmittelCache();
+    const cached = cache.find(l => l.name.toLowerCase() === meal.name.toLowerCase());
+    if (cached) return cached.id;
+    const { data: found } = await sb.from('lebensmittel').select('id').ilike('name', meal.name).limit(1);
+    if (found && found.length > 0) return found[0].id;
+    const { data: created } = await sb.from('lebensmittel').insert({
+      name: meal.name, kalorien: kcal100, protein: prot100,
+      fett: fat100, kohlenhydrate: carbs100, zucker: 0, salz: 0,
+    }).select('id').single();
+    return created?.id ?? null;
+  } catch(e) { return null; }
+}
+
+async function addEintragToSupabase(meal, localId) {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const lmId = await findOrCreateLebensmittel(meal);
+    if (!lmId) return;
+    const { data } = await sb.from('eintraege').insert({
+      datum: getToday(), lebensmittel_id: lmId, menge_gramm: meal.grams || 100, notiz: '',
+    }).select('id').single();
+    if (data?.id) {
+      const log = loadLog(); const d = getToday();
+      if (log[d]) { const e = log[d].find(x => x.id === localId); if (e) { e.sbId = data.id; saveLogData(log); } }
+    }
+  } catch(e) {}
+}
+
+async function syncTodayFromSupabase() {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const today = getToday();
+    const { data, error } = await sb.from('eintraege')
+      .select('id, menge_gramm, lebensmittel(id, name, kalorien, protein, fett, kohlenhydrate)')
+      .eq('datum', today).order('id', { ascending: false });
+    if (error || !data) return;
+    const meals = data.map(e => {
+      const g = e.menge_gramm || 100; const f = g / 100; const l = e.lebensmittel || {};
+      return { id: e.id, sbId: e.id, name: l.name || '',
+        kcal: Math.round((l.kalorien||0)*f), protein: +((l.protein||0)*f).toFixed(1),
+        carbs: +((l.kohlenhydrate||0)*f).toFixed(1), fat: +((l.fett||0)*f).toFixed(1), grams: g };
+    });
+    const log = loadLog(); log[today] = meals; saveLogData(log); render();
+  } catch(e) {}
+}
+
+async function syncWeightFromSupabase() {
+  const sb = getSB(); if (!sb) return;
+  try {
+    const { data, error } = await sb.from('gewicht')
+      .select('datum, gewicht_kg').order('datum', { ascending: false }).limit(90);
+    if (error || !data) return;
+    saveWeightLog(data.map(e => ({ date: e.datum, kg: e.gewicht_kg })));
+    render();
+  } catch(e) {}
+}
+
+async function initSupabase() {
+  try {
+    getSB();
+    await Promise.all([syncLebensmittelCache(), syncTodayFromSupabase(), syncWeightFromSupabase()]);
+  } catch(e) { console.warn('Supabase init failed:', e); }
 }
 
 function getTotals(meals) {
@@ -263,9 +388,18 @@ const NATURAL_FOODS = [
 function searchLocalFoods(query) {
   const q = query.toLowerCase().trim();
   const terms = q.split(/\s+/);
-  return NATURAL_FOODS
+  const cache = getLebensmittelCache();
+  const foods = cache.length > 0
+    ? cache.map(row => ({
+        id: row.id, sbId: row.id, name: row.name,
+        kcal100: row.kalorien, protein100: row.protein,
+        carbs100: row.kohlenhydrate, fat100: row.fett,
+        local: true, brand: '', serving: 100, tags: '',
+      }))
+    : NATURAL_FOODS;
+  return foods
     .map(food => {
-      const haystack = (food.name + ' ' + food.tags).toLowerCase();
+      const haystack = (food.name + ' ' + (food.tags||'')).toLowerCase();
       const score = terms.reduce((s, t) => {
         if (food.name.toLowerCase().startsWith(t)) return s + 3;
         if (food.name.toLowerCase().includes(t))   return s + 2;
@@ -1240,12 +1374,16 @@ function commitFoodAdd() {
   const g = Math.max(+($('grams-inp')?.value) || S.selectedGrams, 1);
   const f = g / 100;
   addMealToLog({
-    name:    food.name,
-    kcal:    num(food.kcal100    * f),
-    protein: num(food.protein100 * f, 1),
-    carbs:   num(food.carbs100   * f, 1),
-    fat:     num(food.fat100     * f, 1),
-    grams:   g,
+    name:       food.name,
+    kcal:       num(food.kcal100    * f),
+    protein:    num(food.protein100 * f, 1),
+    carbs:      num(food.carbs100   * f, 1),
+    fat:        num(food.fat100     * f, 1),
+    grams:      g,
+    kcal100:    food.kcal100,
+    protein100: food.protein100,
+    carbs100:   food.carbs100,
+    fat100:     food.fat100,
   });
   S.showFoodModal = false;
   S.selectedFoodIdx = -1;
@@ -1271,14 +1409,17 @@ function commitManualAdd() {
   const kcal = parseFloat($('mn-kcal')?.value);
   if (!name)       { showToast('Bitte einen Namen eingeben', '#dc2626'); return; }
   if (!kcal || isNaN(kcal)) { showToast('Bitte Kalorien eingeben', '#dc2626'); return; }
-  const grams = parseFloat($('mn-grams')?.value) || null;
+  const grams   = parseFloat($('mn-grams')?.value)   || null;
+  const protein = parseFloat($('mn-protein')?.value) || 0;
+  const carbs   = parseFloat($('mn-carbs')?.value)   || 0;
+  const fat     = parseFloat($('mn-fat')?.value)     || 0;
+  const g = grams || 100; const ratio = g / 100;
   addMealToLog({
-    name,
-    kcal,
-    protein: parseFloat($('mn-protein')?.value) || 0,
-    carbs:   parseFloat($('mn-carbs')?.value)   || 0,
-    fat:     parseFloat($('mn-fat')?.value)     || 0,
-    grams,
+    name, kcal, protein, carbs, fat, grams,
+    kcal100:    Math.round(kcal    / ratio),
+    protein100: +(protein / ratio).toFixed(1),
+    carbs100:   +(carbs   / ratio).toFixed(1),
+    fat100:     +(fat     / ratio).toFixed(1),
   });
   S.showManualModal = false;
   showToast(`${name.substring(0,24)} hinzugefügt ✓`);
@@ -1331,7 +1472,7 @@ async function doSearch(query) {
 // Inline Service Worker for offline support (caches this HTML page & API calls)
 if ('serviceWorker' in navigator) {
   const swCode = `
-    const V = 'kal-v2';
+    const V = 'kal-v3';
     self.addEventListener('install', e => {
       e.waitUntil(caches.open(V).then(c => c.addAll([location.pathname])).then(() => self.skipWaiting()));
     });
@@ -1340,6 +1481,7 @@ if ('serviceWorker' in navigator) {
     });
     self.addEventListener('fetch', e => {
       if (e.request.method !== 'GET') return;
+      if (e.request.url.includes('supabase.co')) return;
       const isAPI = e.request.url.includes('openfoodfacts.org');
       e.respondWith(
         caches.open(V).then(cache =>
@@ -1360,6 +1502,7 @@ if ('serviceWorker' in navigator) {
 
 // Boot
 render();
+initSupabase();
 </script>
 </body>
 </html>
